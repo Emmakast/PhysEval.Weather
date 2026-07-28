@@ -24,6 +24,23 @@ Contents
    examples
    api
 
+Citation
+--------
+
+If you use **PhysMetrics.Weather** in your research, please cite our paper:
+
+.. code-block:: bibtex
+
+   @misc{kasteleyn2026physmetricsweatherevaluationframeworkphysical,
+         title={PhysMetrics.Weather: An Evaluation Framework for Physical Consistency in ML Weather Models}, 
+         author={Emma Kasteleyn and Timo Maier and Axel Lauer and Veronika Eyring and Pierre Gentine and Ana Lucic},
+         year={2026},
+         eprint={2606.10642},
+         archivePrefix={arXiv},
+         primaryClass={cs.LG},
+         url={https://arxiv.org/abs/2606.10642}, 
+   }
+
 Indices and tables
 ==================
 
