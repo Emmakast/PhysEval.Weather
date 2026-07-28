@@ -18,6 +18,7 @@ from physmetrics_weather.physics_metrics import (
     compute_lapse_rate_wasserstein,
     compute_pure_tcwv,
     compute_q_spectrum,
+    compute_scalar_spectrum,
     compute_spectral_scores,
     compute_total_energy,
     compute_water_mass,
@@ -311,3 +312,12 @@ def test_compute_pure_tcwv(mock_deterministic_ds):
     tcwv_pure = compute_pure_tcwv(mock_deterministic_ds)
     assert isinstance(tcwv_pure, xr.DataArray)
     assert tcwv_pure.shape == (32, 64)
+
+
+def test_compute_scalar_spectrum(mock_deterministic_ds):
+    """Test spherical harmonic spectrum calculation for arbitrary scalar fields."""
+    k, spec = compute_scalar_spectrum(mock_deterministic_ds, var_name="temperature", level=850.0)
+    assert isinstance(k, np.ndarray)
+    assert isinstance(spec, np.ndarray)
+    assert len(k) == len(spec)
+    assert len(k) > 0

@@ -16,8 +16,8 @@ Ensemble / Probabilistic Model Support:
     identifier (defaulting to 0 for deterministic models).
 
 Usage:
-    physmetrics-run --year 2022
-    physmetrics-run --dates 2022-01-01 2022-01-02 --workers 4
+    physmetrics-run --year 2020
+    physmetrics-run --dates 2020-01-01 2020-01-02 --workers 4
     physmetrics-run --prediction-zarr <path_to_zarr> --output-dir ./results
 """
 
@@ -60,6 +60,7 @@ from physmetrics_weather.physics_metrics import (
     compute_ke_spectrum,
     compute_lapse_rate_wasserstein,
     compute_q_spectrum,
+    compute_scalar_spectrum,
     compute_spectral_scores,
     derive_surface_pressure,
     get_grid_cell_area,
@@ -73,7 +74,7 @@ warnings.filterwarnings("ignore", category=FutureWarning, message=".*prediction_
 # Configuration & Constants
 # ============================================================================
 
-DEFAULT_MODEL_ZARR: str = "gs://weatherbench2/datasets/aurora/2022-1440x721.zarr"
+DEFAULT_MODEL_ZARR: str = "gs://weatherbench2/datasets/pangu/2018-2022_0012_0p25.zarr"
 REF_ZARR: str = (
     "gs://weatherbench2/datasets/era5/1959-2023_01_10-wb13-6h-1440x721_with_derived_variables.zarr"
 )
@@ -117,6 +118,7 @@ class EvaluationConfig:
         static_zarr: Optional path to static fields Zarr.
         extended_spectra: Compute extra Q and 850hPa KE spectra.
         sp_ablation: Surface pressure derivation ablation mode.
+        spectra: List of (variable_type, level_hpa) tuples for spectra evaluation.
     """
 
     dates: List[str]
@@ -131,10 +133,16 @@ class EvaluationConfig:
     static_zarr: Optional[str] = None
     extended_spectra: bool = False
     sp_ablation: str = "default"
+    spectra: Optional[List[Tuple[str, float]]] = None
 
     def __post_init__(self) -> None:
         if self.lead_times is None:
             self.lead_times = LEAD_TIMES
+        if self.spectra is None:
+            if self.extended_spectra:
+                self.spectra = [("KE", 500.0), ("Q", 500.0), ("KE", 850.0)]
+            else:
+                self.spectra = [("KE", 500.0)]
 
 
 # ============================================================================
@@ -398,6 +406,28 @@ def _parse_lead_times(spec: str) -> List[Tuple[str, np.timedelta64]]:
     return result
 
 
+def _parse_spectra_spec(spec: str) -> List[Tuple[str, float]]:
+    """Parse comma-separated spectra specification string (e.g. 'KE:500,Q:500,T:850').
+
+    Args:
+        spec: Comma-separated string of 'VAR:LEVEL' tokens.
+
+    Returns:
+        List of (variable_type, pressure_level_hpa) tuples.
+    """
+    result = []
+    for token in spec.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if ":" in token:
+            var_name, lvl_str = token.split(":", 1)
+            result.append((var_name.strip().upper(), float(lvl_str.strip())))
+        else:
+            result.append((token.upper(), 500.0))
+    return result
+
+
 # ============================================================================
 # Single Slice Evaluation Workhorse
 # ============================================================================
@@ -417,6 +447,7 @@ def _evaluate_one(
     model_name: str = "model",
     extended_spectra: bool = False,
     sp_ablation: str = "default",
+    spectra: Optional[List[Tuple[str, float]]] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Fetch, preprocess, and evaluate physics metrics for one date and lead time slice.
 
@@ -791,97 +822,88 @@ def _evaluate_one(
             ds_ref_aligned = None
 
         if ds_ref_aligned is not None:
+            spectra_list = spectra or [("KE", 500.0)]
             for m in ens_members:
                 if ens_dim and ens_dim in ds_model_t.dims:
                     ds_model_m = ds_model_t.sel({ens_dim: m})
                 else:
                     ds_model_m = ds_model_t
 
+                # Environmental Lapse Rate Wasserstein Distance
                 try:
-                    k_pred, e_pred = compute_ke_spectrum(ds_model_m, level=500.0)
-                    k_ref, e_ref = compute_ke_spectrum(ds_ref_aligned, level=500.0)
-                    n_min = min(len(e_pred), len(e_ref))
-
-                    k_common = k_pred[:n_min]
-                    e_pred_c = e_pred[:n_min]
-                    e_ref_c = e_ref[:n_min]
-
-                    eff_res_out = _find_effective_resolution(k_common, e_pred_c, e_ref_c)
-                    L_eff, ratio = (
-                        eff_res_out
-                        if isinstance(eff_res_out, tuple)
-                        else (eff_res_out, float("nan"))
+                    lr_results = compute_lapse_rate_wasserstein(
+                        ds_model_m, ds_ref_aligned, area_model
                     )
+                    for band_key, w1_val in lr_results.items():
+                        _append_summary(band_key, w1_val, None, ens_member=m)
+                except (ValueError, KeyError, AttributeError) as exc:
+                    _log(f"    [{counter}] Lapse rate evaluation failed: {exc}")
 
-                    s_div, s_res = compute_spectral_scores(e_pred_c, e_ref_c)
+                # Configurable Target Spectra Evaluation
+                for s_idx, (var_type, lvl_val) in enumerate(spectra_list):
+                    v_key = var_type.upper()
+                    var_label = f"{v_key}_{int(lvl_val)}"
 
-                    _append_summary("effective_resolution_km", L_eff, None, ens_member=m)
-                    _append_summary("small_scale_ratio", ratio, None, ens_member=m)
-                    _append_summary("spectral_divergence", s_div, None, ens_member=m)
-                    _append_summary("spectral_residual", s_res, None, ens_member=m)
+                    try:
+                        if v_key == "KE":
+                            k_p, e_p = compute_ke_spectrum(ds_model_m, level=lvl_val)
+                            k_r, e_r = compute_ke_spectrum(ds_ref_aligned, level=lvl_val)
+                        elif v_key in ("Q", "SPECIFIC_HUMIDITY"):
+                            k_p, e_p = compute_q_spectrum(ds_model_m, level=lvl_val)
+                            k_r, e_r = compute_q_spectrum(ds_ref_aligned, level=lvl_val)
+                        else:
+                            k_p, e_p = compute_scalar_spectrum(
+                                ds_model_m, var_name=var_type, level=lvl_val
+                            )
+                            k_r, e_r = compute_scalar_spectrum(
+                                ds_ref_aligned, var_name=var_type, level=lvl_val
+                            )
 
-                    for wi in range(n_min):
-                        spectrum_rows.append(
-                            {
+                        n_min = min(len(e_p), len(e_r))
+                        k_common = k_p[:n_min]
+                        e_pred_c = e_p[:n_min]
+                        e_ref_c = e_r[:n_min]
+
+                        # Primary spectrum (first entry) generates summary metrics
+                        if s_idx == 0:
+                            eff_res_out = _find_effective_resolution(
+                                k_common, e_pred_c, e_ref_c
+                            )
+                            L_eff, ratio = (
+                                eff_res_out
+                                if isinstance(eff_res_out, tuple)
+                                else (eff_res_out, float("nan"))
+                            )
+                            s_div, s_res = compute_spectral_scores(e_pred_c, e_ref_c)
+
+                            _append_summary(
+                                "effective_resolution_km", L_eff, None, ens_member=m
+                            )
+                            _append_summary(
+                                "small_scale_ratio", ratio, None, ens_member=m
+                            )
+                            _append_summary(
+                                "spectral_divergence", s_div, None, ens_member=m
+                            )
+                            _append_summary(
+                                "spectral_residual", s_res, None, ens_member=m
+                            )
+
+                        for wi in range(n_min):
+                            spectrum_rows.append({
                                 "date": date_str,
                                 "lead_hours": lead_hours,
-                                "variable": "KE_500",
-                                "wavenumber": int(k_pred[wi]),
-                                "power_pred": float(e_pred[wi]),
-                                "power_ref": float(e_ref[wi]),
+                                "variable": var_label,
+                                "wavenumber": int(k_p[wi]),
+                                "power_pred": float(e_p[wi]),
+                                "power_ref": float(e_r[wi]),
                                 "ensemble_member": m,
-                            }
-                        )
-
-                    # Environmental Lapse Rate Wasserstein Distance
-                    try:
-                        lr_results = compute_lapse_rate_wasserstein(
-                            ds_model_m, ds_ref_aligned, area_model
-                        )
-                        for band_key, w1_val in lr_results.items():
-                            _append_summary(band_key, w1_val, None, ens_member=m)
+                            })
                     except (ValueError, KeyError, AttributeError) as exc:
-                        _log(f"    [{counter}] Lapse rate evaluation failed: {exc}")
-
-                    # Extended Spectra (Q at 500hPa & KE at 850hPa)
-                    if extended_spectra:
-                        try:
-                            kq_pred, sq_pred = compute_q_spectrum(ds_model_m, level=500.0)
-                            kq_ref, sq_ref = compute_q_spectrum(ds_ref_aligned, level=500.0)
-                            nq_min = min(len(sq_pred), len(sq_ref))
-                            for wi in range(nq_min):
-                                spectrum_rows.append(
-                                    {
-                                        "date": date_str,
-                                        "lead_hours": lead_hours,
-                                        "variable": "Q_500",
-                                        "wavenumber": int(kq_pred[wi]),
-                                        "power_pred": float(sq_pred[wi]),
-                                        "power_ref": float(sq_ref[wi]),
-                                        "ensemble_member": m,
-                                    }
-                                )
-
-                            kke850_p, e850_p = compute_ke_spectrum(ds_model_m, level=850.0)
-                            kke850_r, e850_r = compute_ke_spectrum(ds_ref_aligned, level=850.0)
-                            n850_min = min(len(e850_p), len(e850_r))
-                            for wi in range(n850_min):
-                                spectrum_rows.append(
-                                    {
-                                        "date": date_str,
-                                        "lead_hours": lead_hours,
-                                        "variable": "KE_850",
-                                        "wavenumber": int(kke850_p[wi]),
-                                        "power_pred": float(e850_p[wi]),
-                                        "power_ref": float(e850_r[wi]),
-                                        "ensemble_member": m,
-                                    }
-                                )
-                        except (ValueError, KeyError, AttributeError) as exc:
-                            _log(f"    [{counter}] Extended spectra failed: {exc}")
-
-                except (ValueError, KeyError, AttributeError) as exc:
-                    _log(f"    [{counter}] Spectral evaluation failed for member {m}: {exc}")
+                        _log(
+                            f"    [{counter}] Spectrum {var_label} failed "
+                            f"for member {m}: {exc}"
+                        )
 
     if not summary_rows:
         _append_summary("ALL_METRICS_FAILED", None, None, ens_member=0)
@@ -949,6 +971,7 @@ class EvaluationPipeline:
                     self.config.model_name,
                     self.config.extended_spectra,
                     self.config.sp_ablation,
+                    self.config.spectra,
                 )
                 futures[fut] = (idx, date_str, lead_label)
 
@@ -1059,6 +1082,7 @@ def run_evaluation(
     static_zarr: Optional[str] = None,
     extended_spectra: bool = False,
     sp_ablation: str = "default",
+    spectra: Optional[List[Tuple[str, float]]] = None,
 ) -> pd.DataFrame:
     """Backward-compatible wrapper function for running evaluation pipeline.
 
@@ -1075,6 +1099,7 @@ def run_evaluation(
         static_zarr: Optional path to static fields Zarr.
         extended_spectra: Compute extra Q and 850hPa KE spectra.
         sp_ablation: Surface pressure derivation ablation mode.
+        spectra: List of (variable, level) tuples for spectral analysis.
 
     Returns:
         pandas DataFrame containing output evaluation summary table.
@@ -1092,6 +1117,7 @@ def run_evaluation(
         static_zarr=static_zarr,
         extended_spectra=extended_spectra,
         sp_ablation=sp_ablation,
+        spectra=spectra,
     )
     pipeline = EvaluationPipeline(config)
     return pipeline.run()
@@ -1107,12 +1133,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Physics evaluation for AI weather models (WB2 Zarr streaming)"
     )
-    parser.add_argument("--year", type=int, default=2022, help="Year to evaluate (default: 2022).")
+    parser.add_argument("--year", type=int, default=2020, help="Year to evaluate (default: 2020).")
     parser.add_argument(
-        "--dates", nargs="+", default=None, help="Dates to evaluate (e.g. 2022-01-01 2022-01-15)."
+        "--dates", nargs="+", default=None, help="Dates to evaluate (e.g. 2020-01-01 2020-01-15)."
     )
     parser.add_argument(
-        "--month", type=str, default=None, help="Evaluate all days of month (e.g. 2022-01)."
+        "--month", type=str, default=None, help="Evaluate all days of month (e.g. 2020-01)."
     )
     parser.add_argument(
         "--workers",
@@ -1164,6 +1190,10 @@ def main() -> None:
         default="default",
         help="SP derivation ablation mode.",
     )
+    parser.add_argument(
+        "--spectra", type=str, default=None,
+        help="Comma-separated target spectra (e.g. 'KE:500,Q:500,T:850')."
+    )
 
     args = parser.parse_args()
     dates = _resolve_dates(args)
@@ -1175,6 +1205,7 @@ def main() -> None:
         output_path = output_dir / f"physics_evaluation_{args.model}_{args.year}.csv"
 
     lt = _parse_lead_times(args.lead_times) if args.lead_times else None
+    spec_list = _parse_spectra_spec(args.spectra) if args.spectra else None
 
     run_evaluation(
         dates=dates,
@@ -1189,6 +1220,7 @@ def main() -> None:
         static_zarr=args.static_zarr,
         extended_spectra=args.extended_spectra,
         sp_ablation=args.sp_ablation,
+        spectra=spec_list,
     )
 
 

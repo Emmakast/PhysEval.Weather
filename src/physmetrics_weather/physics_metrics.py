@@ -876,10 +876,71 @@ def compute_q_spectrum(
 
     lat_dims = [d for d in q.dims if "lat" in d.lower()]
     lon_dims = [d for d in q.dims if "lon" in d.lower()]
-    if lat_dims and lon_dims:
-        q = q.transpose(..., lat_dims[0], lon_dims[0])
-
     return _scalar_spectrum_spharm(q.values)
+
+
+VAR_ALIASES: Dict[str, Tuple[str, ...]] = {
+    "Q": Q_NAMES,
+    "T": T_NAMES,
+    "Z": PHI_NAMES,
+    "PHI": PHI_NAMES,
+    "SP": SP_NAMES,
+    "MSL": MSL_NAMES,
+    "T2M": T2M_NAMES,
+}
+
+
+def compute_scalar_spectrum(
+    ds: xr.Dataset,
+    var_name: str,
+    level: float = 500.0,
+    level_dim: str = "level",
+) -> Union[Tuple[np.ndarray, np.ndarray], Dict[Any, Tuple[np.ndarray, np.ndarray]]]:
+    """Compute spherical-harmonic power spectrum S(l) of any scalar variable at a level.
+
+    Args:
+        ds: Input xarray Dataset.
+        var_name: Name or variable alias candidate string (e.g. 'T', 'Q', 'Z', 'temperature').
+        level: Target pressure level in hPa (default: 500.0).
+        level_dim: Pressure level dimension name.
+
+    Returns:
+        Tuple of (wavenumber_array, power_spectrum_array) for deterministic input,
+        or Dict[member_id, Tuple[wavenumber, power]] for ensemble datasets.
+    """
+    ens_dim = _detect_ensemble_dim(ds)
+    if ens_dim is not None and ens_dim in ds.dims:
+        results = {}
+        for m in ds[ens_dim].values:
+            results[m] = compute_scalar_spectrum(
+                ds.sel({ens_dim: m}), var_name=var_name, level=level, level_dim=level_dim
+            )
+        return results
+
+    if level_dim not in ds.dims:
+        level_dim = _detect_level_dim(ds)
+
+    var_key = var_name.upper()
+    actual_var = None
+    if var_key in VAR_ALIASES:
+        actual_var = _find_var(ds, VAR_ALIASES[var_key])
+    if actual_var is None and var_name in ds.data_vars:
+        actual_var = var_name
+    if actual_var is None:
+        actual_var = DatasetValidator.require_variable(ds, (var_name,), f"Scalar ({var_name})")
+
+    da = ds[actual_var]
+    if level_dim in da.dims:
+        lvls = ds[level_dim].values
+        idx = int(np.abs(lvls - level).argmin())
+        da = da.isel({level_dim: idx})
+
+    lat_dims = [d for d in da.dims if "lat" in d.lower()]
+    lon_dims = [d for d in da.dims if "lon" in d.lower()]
+    if lat_dims and lon_dims:
+        da = da.transpose(..., lat_dims[0], lon_dims[0])
+
+    return _scalar_spectrum_spharm(da.values)
 
 
 def _find_effective_resolution(

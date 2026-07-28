@@ -134,6 +134,7 @@ Required variable names (or standard aliases):
 | `--output-dir` | `./results` | Directory for output CSV results |
 | `--output` | — | Custom destination CSV file path |
 | `--mode` | `joint` | Evaluation mode (`joint`, `ref`, `prediction`, `model`) |
+| `--spectra` | `KE:500` | Comma-separated target spectra specs, e.g. `KE:500,Q:500,T:850` |
 | `--extended-spectra` | off | Compute additional Q and 850 hPa spectra |
 | `--quiet` | off | Suppress verbose progress logging |
 
