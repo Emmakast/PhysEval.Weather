@@ -1,252 +1,191 @@
-# PhysMetrics.Weather
+# PhysEval-Weather (physeval-weather)
 
-An open-source, unified framework for evaluating the **physical consistency** of Machine Learning Weather Prediction (MLWP) models.  It computes nine physics-based diagnostic metrics against an
-ERA5 or IFS HRES reference dataset and generates plots and
-summary tables.
+An open-source, unified framework for evaluating the **physical consistency**, **spectral resolution**, and **atmospheric balance** of Machine Learning Weather Prediction (MLWP) models.
+
+It computes diagnostic physical metrics against ERA5 or IFS HRES reference datasets from [WeatherBench 2](https://weatherbench2.readthedocs.io/), supporting both **deterministic** and **probabilistic / ensemble** weather models.
 
 ---
 
-## What does it evaluate?
+## Authors
 
-| Metric | What it measures |
-|---|---|
-| **Dry Air Mass drift** | Is global dry-air mass conserved? |
-| **Water Mass drift** | Is global water-vapour mass conserved? |
-| **Total Energy drift** | Is global total energy conserved? |
-| **Effective Resolution** | At what spatial scale does the model lose skill? |
-| **Spectral Divergence** | How much does the kinetic-energy spectrum diverge from reference data? |
-| **Spectral Residual** | Excess/deficit small-scale energy vs reference data |
-| **Hydrostatic Balance** | How well does the model satisfy hydrostatic balance? |
-| **Geostrophic Balance** | How well does the model satisfy geostrophic balance? |
-| **Lapse Rate** | How much does the lapse rate distribution diverge from the reference data? |
+* **Emma Kasteleyn**
+* **Timo Maier** (`timo.maier@tum.de`)
 
-Metrics are computed at multiple forecast lead times (default: 12 h, 5 days,
-10 days) and written to a long-format CSV for downstream analysis.
+---
+
+## Key Metrics Evaluated
+
+| Metric Category | Metric | What it measures |
+|---|---|---|
+| **Conservation & Stability** | **Dry Air Mass drift** | Is global dry-air mass conserved over time? (Exagrams, %/day) |
+| | **Water Mass drift** | Is global total atmospheric water mass conserved? (kg, %/day) |
+| | **Total Energy drift** | Is global total atmospheric energy conserved? (Joules, %/day) |
+| **Spectral Skill** | **Kinetic Energy Spectrum** | Spherical harmonic KE spectrum at 500 hPa & 850 hPa |
+| | **Humidity Spectrum** | Power spectrum of specific humidity at 500 hPa |
+| | **Effective Resolution ($L_{eff}$)** | Spatial scale (km) where model loses skill vs. reference |
+| | **Spectral Divergence** | 1-Wasserstein distance between true and predicted spectra |
+| | **Spectral Residual** | Log-RMSE difference between energy spectra |
+| **Atmospheric Balance** | **Hydrostatic Balance** | Hypsometric balance error RMSE ($m^2/s^2$) between 500 & 850 hPa |
+| | **Geostrophic Balance** | Area-weighted wind balance RMSE ($m/s$) at 500 hPa |
+| **Thermal Structure** | **Lapse Rate Wasserstein** | Environmental lapse rate distribution distance across geographical bands |
 
 ---
 
 ## Installation
 
-The project uses [uv](https://docs.astral.sh/uv/) for fast, reproducible
-dependency management.
+The package supports Python `>= 3.10` up to `3.14`. You can manage dependencies using [uv](https://docs.astral.sh/uv/) or standard `pip`.
+
+### Using `uv` (Recommended)
 
 ```bash
-# 1. Install uv (one-time, if you don't have it)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# 2. Clone the repository
+# 1. Clone the repository
 git clone https://github.com/Emmakast/PhysMetrics.Weather.git
 cd PhysMetrics.Weather
 
-# 3. Create a virtual environment and install all dependencies
-uv sync
+# 2. Sync dependencies and create environment
+uv sync --extra dev --extra docs
 
-# 4. Activate the environment
+# 3. Activate the virtual environment
 source .venv/bin/activate   # Linux / macOS
 # .venv\Scripts\activate    # Windows
 ```
-**NOTE:** this uv installation does not work for an anonymized GitHub. To still allow for easy verification of the code, there is a Notebook folder containing plots.
 
-After installation the following commands are available on your `PATH`:
-
-| Command | Purpose |
-|---|---|
-| `physmetrics-run` | Run physics evaluation and produce a CSV of metrics |
-| `physmetrics-plot` | Generate all plots from evaluation CSVs |
-
-You can also invoke them without activating the environment:
-
-```bash
-uv run physmetrics-run --help
-uv run physmetrics-plot --help
-```
-
-### Alternative: plain pip
+### Using standard `pip`
 
 ```bash
 pip install -e .
 ```
 
----
+After installation, the CLI commands `physeval-run` and `physeval-plot` are available on your system `PATH`:
 
-## Inputs: what do you need to provide?
-
-### Option A — use WeatherBench 2 data (no download required)
-
-The framework is pre-configured to stream data directly from the public
-[WeatherBench 2](https://weatherbench2.readthedocs.io/) Google Cloud Storage
-buckets.  **No files need to be downloaded** — xarray reads only the slices it
-needs over the network.
-
-Running the command below evaluates Pangu-Weather predictions against ERA5 for the
-year 2022 using the WB2 default paths:
-
-```bash
-uv run physmetrics-run --year 2022 --model pangu \
-  --prediction-zarr gs://weatherbench2/datasets/pangu/2018-2022_0012_0p25.zarr \
-  --output results/pangu_2022.csv
-```
-
-Other models that are already in WB2:
-
-```bash
-# GraphCast
-uv run physmetrics-run --model graphcast \
-  --prediction-zarr gs://weatherbench2/datasets/graphcast/2020/date_range_2019-11-16_2021-02-01_12_hours_derived.zarr \
-  --year 2020 --output results/graphcast_2020.csv
-```
-
-### Option B — bring your own prediction file
-
-Point `--prediction-zarr` at **any Zarr store** — local or remote:
-
-```bash
-# Local Zarr directory
-uv run physmetrics-run --model my_model \
-  --prediction-zarr /data/my_model_forecasts.zarr \
-  --output results/my_model_2022.csv
-
-# S3
-uv run physmetrics-run --model my_model \
-  --prediction-zarr s3://my-bucket/forecasts.zarr \
-  --output results/my_model_2022.csv
-
-# Custom GCS bucket
-uv run physmetrics-run --model my_model \
-  --prediction-zarr gs://my-bucket/forecasts.zarr \
-  --output results/my_model_2022.csv
-```
-
-You can also supply your own reference dataset instead of ERA5 (e.g., the IFS HRES analysis):
-
-```bash
-uv run physmetrics-run --model my_model \
-  --prediction-zarr /data/my_model_forecasts.zarr \
-  --reference ifs \
-  --ref-zarr gs://weatherbench2/datasets/hres_t0/2016-2022-6h-1440x721.zarr \
-  --output results/my_model_2022.csv
-```
-
-The Zarr store must contain forecast data with at least the following
-variables (or common aliases):
-
-| Physical quantity | Accepted variable names |
+| Command | Description |
 |---|---|
-| Surface pressure | `surface_pressure`, `sp`, `ps` |
-| Temperature (pressure levels) | `temperature`, `t` |
-| U wind (pressure levels) | `u_component_of_wind`, `u` |
-| V wind (pressure levels) | `v_component_of_wind`, `v` |
-| Specific humidity | `specific_humidity`, `q` |
-| Geopotential (pressure levels) | `geopotential`, `z` |
-
-The ERA5 reference is always read from the public WB2 bucket by default;
-you can override it with `--ref-zarr`.
+| `physeval-run` | Stream WeatherBench 2 Zarr data, run physics metrics, output long-format CSV |
+| `physeval-plot` | Generate publication-ready figures and visualization plots from output CSVs |
 
 ---
 
-## Running the full pipeline
+## Probabilistic & Ensemble Model Support
 
-### 1. Evaluate a model
+`physeval-weather` automatically detects extra ensemble dimensions in your datasets (e.g. `ens`, `realization`, `member`, `ensemble`, `number`).
+
+* **Per-Member Evaluation**: Metrics are computed for each individual ensemble member.
+* **Output Format**: The resulting long-format CSV includes an `ensemble_member` column (`0` for deterministic models, or member ID `0, 1, 2, ...` for ensemble realizations).
+
+---
+
+## Data Inputs & Usage
+
+### 1. WeatherBench 2 Streaming (No Download Required)
+
+Stream data directly from public WeatherBench 2 Google Cloud Storage buckets:
 
 ```bash
-uv run physmetrics-run \
+# Evaluate Pangu-Weather predictions against ERA5 for 2022
+physeval-run \
   --model pangu \
   --prediction-zarr gs://weatherbench2/datasets/pangu/2018-2022_0012_0p25.zarr \
   --year 2022 \
-  --workers 8 \
-  --output results/physics_evaluation_pangu_2022.csv
+  --workers 4 \
+  --output-dir ./results
 ```
 
-Key options:
+### 2. Custom Zarr Dataset Evaluation
 
-| Flag | Default | Description |
-|---|---|---|
-| `--year` | 2022 | Year to evaluate |
-| `--dates` | — | Evaluate specific dates, e.g. `2022-01-01 2022-02-01` |
-| `--month` | — | Evaluate a full month, e.g. `2022-06` |
-| `--model` | `model` | Model name (used in the output filename) |
-| `--prediction-zarr` | WB2 path | Zarr store for the model predictions |
-| `--ref-zarr` | ERA5 WB2 path | Zarr store for the reference dataset |
-| `--reference` | `era5` | Use `era5` or `ifs` (IFS HRES t=0) as the reference |
-| `--lead-times` | `12h,5d,10d` | Comma-separated lead times to evaluate |
-| `--workers` | 16 | Number of parallel workers |
-| `--output` | auto | Output CSV path |
-| `--extended-spectra` | off | Also compute the q spectrum and the KE spectrum at 850 hPa (in addition to the default 500 hPa KE spectrum) |
-| `--quiet` | off | Suppress progress output |
-
-### 2. Plot results
+Point `--prediction-zarr` at any local or cloud Zarr store:
 
 ```bash
-uv run physmetrics-plot \
-  --results-dir results/ \
-  --outdir plots/
+physeval-run \
+  --model my_model \
+  --prediction-zarr /path/to/my_model_forecasts.zarr \
+  --output-dir ./results
 ```
 
-Key options:
-
-| Flag | Default | Description |
-|---|---|---|
-| `--results-dir` | `../results` | Directory containing evaluation CSVs |
-| `--outdir` | `../plots` | Directory to write plot images |
+Required variable names (or standard aliases):
+* **Surface Pressure**: `surface_pressure`, `sp`, `ps`
+* **Temperature**: `temperature`, `t`
+* **Zonal Wind**: `u_component_of_wind`, `u`
+* **Meridional Wind**: `v_component_of_wind`, `v`
+* **Specific Humidity**: `specific_humidity`, `q`
+* **Geopotential**: `geopotential`, `z`
 
 ---
 
-## SLURM example
+## CLI Options
+
+### `physeval-run`
+
+| Option | Default | Description |
+|---|---|---|
+| `--year` | `2022` | Year to evaluate |
+| `--dates` | — | Specific dates, e.g. `2022-01-01 2022-01-15` |
+| `--month` | — | Specific month, e.g. `2022-01` |
+| `--model` | `model` | Model name identifier |
+| `--prediction-zarr` | WB2 path | Zarr store URL or local path for model predictions |
+| `--ref-zarr` | ERA5 WB2 path | Zarr store URL or local path for reference dataset |
+| `--lead-times` | `12h,5d,10d` | Comma-separated forecast lead times |
+| `--workers` | `4` | Parallel worker process count |
+| `--output-dir` | `./results` | Directory for output CSV results |
+| `--extended-spectra` | off | Also compute 850 hPa KE spectrum and Q spectrum |
+| `--quiet` | off | Suppress verbose logging |
+
+### `physeval-plot`
 
 ```bash
-#!/bin/bash
-#SBATCH --job-name=eval_hres
-#SBATCH --nodes=1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=64G
-#SBATCH --time=12:00:00
+physeval-plot --results-dir ./results --outdir ./plots
+```
 
-MODEL="hres"
-YEAR="${YEAR:-2020}"
-WORKERS="${WORKERS:-16}"
-PREDICTION_ZARR="gs://weatherbench2/datasets/hres/2016-2022-0012-1440x721.zarr"
-REF_ZARR="gs://weatherbench2/datasets/hres_t0/2016-2022-6h-1440x721.zarr"
-OUTPUT_CSV="results/physics_evaluation_${MODEL}_${YEAR}.csv"
+| Option | Default | Description |
+|---|---|---|
+| `--results-dir` | `./results` | Path to directory containing output CSV files |
+| `--outdir` | `./plots` | Path to directory for saving generated figures |
+| `--reference-label` | auto | Reference label override for legends (`ERA5` or `IFS`) |
 
-uv run physmetrics-run \
-  --model "$MODEL" \
-  --prediction-zarr "$PREDICTION_ZARR" \
-  --reference ifs \
-  --ref-zarr "$REF_ZARR" \
-  --year "$YEAR" \
-  --lead-times "12h,5d,10d" \
-  --workers "$WORKERS" \
-  --output "$OUTPUT_CSV"
+---
+
+## Output CSV Format
+
+`physeval-run` outputs long-format CSV files with the following structure:
+
+```csv
+date,lead_time_hours,metric_name,model_value,ref_value,n_levels,sp_method,ensemble_member
+2022-01-01,12,hydrostatic_rmse,1.23,0.98,13,direct_sp,0
+2022-01-01,12,geostrophic_rmse,2.45,2.10,13,direct_sp,0
+2022-01-01,120,dry_mass_drift_pct_per_day,-0.002,,13,direct_sp,0
 ```
 
 ---
 
-## Output format
+## Documentation
 
-`physmetrics-run` writes a **long-format CSV**:
+Full Sphinx documentation is available in the `docs/` directory.
 
-```
-date,lead_time_hours,metric_name,model_value,era5_value,n_levels,sp_method
-2022-01-01,12,geostrophic_rmse,2.45,2.10,13,direct_sp
-2022-01-01,12,hydrostatic_rmse,1.23,0.98,13,direct_sp
-2022-01-01,120,dry_mass_drift_pct_per_day,-0.002,,,
-...
+### Build and View Locally
+
+```bash
+# Build Sphinx HTML documentation
+uv run sphinx-build -b html docs docs/_build/html
+
+# Serve locally at http://localhost:8000
+python3 -m http.server 8000 --directory docs/_build/html
 ```
 
 ---
 
-## Requirements
+## Testing & Verification
 
-- Python ≥ 3.10
-- Internet access for WeatherBench 2 data (GCS)  
-  *(or a locally available Zarr store if using Option B)*
+Run the comprehensive unit test suite:
 
-All Python dependencies are pinned in `uv.lock` and installed automatically
-by `uv sync`.
+```bash
+# Run pytest test suite
+uv run pytest
+
+# Verify wheel and source distribution build
+uv build
+```
 
 ---
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
-
+This project is licensed under the [MIT License](LICENCE).
