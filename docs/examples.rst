@@ -3,6 +3,9 @@ Examples
 
 This page provides practical code examples for using ``physmetrics_weather`` via Python API and CLI.
 
+.. note::
+   **Execution Time Notice**: Evaluating a full 365-day year across multiple forecast lead horizons involves streaming data and computing 3D integrations and spherical harmonic spectra for over 1,000 data slices. A full-year run can take several hours depending on network bandwidth and parallel CPU workers. For quick tests and examples, use ``--dates 2020-01-01 2020-01-02``.
+
 Evaluating Single Slices via Python API
 ---------------------------------------
 
@@ -21,7 +24,7 @@ Evaluating Single Slices via Python API
    ds_model = xr.open_zarr("gs://weatherbench2/datasets/aurora/2022-1440x721.zarr", storage_options={"token": "anon"})
    ds_ref = xr.open_zarr("gs://weatherbench2/datasets/era5/1959-2023_01_10-wb13-6h-1440x721_with_derived_variables.zarr", storage_options={"token": "anon"})
 
-   snapshot = ds_model.sel(time="2022-01-01T00:00:00").isel(prediction_timedelta=2)
+   snapshot = ds_model.sel(time="2020-01-01T00:00:00").isel(prediction_timedelta=2)
    area = get_grid_cell_area(snapshot)
    ps = derive_surface_pressure(snapshot, ds_ref)
 
@@ -43,10 +46,10 @@ Use ``EvaluationPipeline`` to evaluate weather model predictions across multiple
    from physmetrics_weather import EvaluationConfig, EvaluationPipeline
 
    config = EvaluationConfig(
-       dates=["2022-01-01", "2022-01-02", "2022-01-03"],
+       dates=["2020-01-01", "2020-01-02"],
        prediction_zarr="gs://weatherbench2/datasets/pangu/2018-2022_0012_0p25.zarr",
        model_name="pangu",
-       output_csv=Path("./results/physics_evaluation_pangu_2022.csv"),
+       output_csv=Path("./results/physics_evaluation_pangu_2020.csv"),
        workers=4,
    )
 
@@ -100,5 +103,5 @@ CLI Batch Running
    physmetrics-run \
      --prediction-zarr /path/to/model_forecast.zarr \
      --model my_model \
-     --dates 2022-01-01 \
+     --dates 2020-01-01 2020-01-02 \
      --output-dir ./results

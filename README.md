@@ -50,6 +50,8 @@ source .venv/bin/activate   # Linux / macOS
 # .venv\Scripts\activate    # Windows
 ```
 
+> **Note on `uv` filesystem warnings**: If your working directory is on a different disk partition/mount than your home directory (where `uv` stores cached wheels), `uv` automatically falls back to full copies and may display `warning: Failed to hardlink files`. This is completely safe. To suppress the warning, run `export UV_LINK_MODE=copy` or use `uv sync --link-mode=copy`.
+
 ### Using standard `pip`
 
 ```bash
@@ -76,16 +78,19 @@ After installation, the CLI commands `physmetrics-run` and `physmetrics-plot` ar
 
 ## Data Inputs & CLI Usage
 
+> [!NOTE]
+> **Execution Time Notice**: Evaluating a full 365-day year across multiple forecast lead horizons involves streaming and calculating spherical harmonic spectra and 3D integrals for over 1,000 data slices. A full-year run can take several hours depending on network bandwidth and CPU cores. For quick testing and examples, use `--dates 2020-01-01 2020-01-02`.
+
 ### 1. WeatherBench 2 Streaming (No Download Required)
 
 Stream data directly from public WeatherBench 2 Google Cloud Storage buckets:
 
 ```bash
-# Evaluate Pangu-Weather predictions against ERA5 for 2022
+# Evaluate Pangu-Weather predictions against ERA5 for specific dates
 physmetrics-run \
   --model pangu \
   --prediction-zarr gs://weatherbench2/datasets/pangu/2018-2022_0012_0p25.zarr \
-  --year 2022 \
+  --dates 2020-01-01 2020-01-02 \
   --workers 4 \
   --output-dir ./results
 ```
@@ -98,6 +103,7 @@ Point `--prediction-zarr` at any local or cloud Zarr store:
 physmetrics-run \
   --model my_model \
   --prediction-zarr /path/to/my_model_forecasts.zarr \
+  --dates 2020-01-01 2020-01-02 \
   --output-dir ./results
 ```
 
@@ -118,8 +124,8 @@ Required variable names (or standard aliases):
 | Option | Default | Description |
 |---|---|---|
 | `--year` | `2022` | Year to evaluate |
-| `--dates` | — | Specific ISO dates, e.g. `2022-01-01 2022-01-15` |
-| `--month` | — | Specific month, e.g. `2022-01` |
+| `--dates` | — | Specific ISO dates, e.g. `2020-01-01 2020-01-02` |
+| `--month` | — | Specific month, e.g. `2020-01` |
 | `--model` | `model` | Model name identifier |
 | `--prediction-zarr` | WB2 path | Zarr store URL or local path for model predictions |
 | `--ref-zarr` | ERA5 WB2 path | Zarr store URL or local path for reference dataset |
@@ -156,10 +162,10 @@ from pathlib import Path
 from physmetrics_weather import EvaluationConfig, EvaluationPipeline
 
 config = EvaluationConfig(
-    dates=["2022-01-01", "2022-01-02"],
+    dates=["2020-01-01", "2020-01-02"],
     prediction_zarr="gs://weatherbench2/datasets/aurora/2022-1440x721.zarr",
     model_name="aurora",
-    output_csv=Path("./results/physics_evaluation_aurora_2022.csv"),
+    output_csv=Path("./results/physics_evaluation_aurora_2020.csv"),
     workers=4,
 )
 
@@ -194,9 +200,9 @@ plots = plotter.generate_all()
 
 ```csv
 date,lead_time_hours,metric_name,model_value,ref_value,n_levels,sp_method,ensemble_member
-2022-01-01,12,hydrostatic_rmse,1.23,0.98,13,direct_sp,0
-2022-01-01,12,geostrophic_rmse,2.45,2.10,13,direct_sp,0
-2022-01-01,120,dry_mass_drift_pct_per_day,-0.002,,13,direct_sp,0
+2020-01-01,12,hydrostatic_rmse,1.23,0.98,13,direct_sp,0
+2020-01-01,12,geostrophic_rmse,2.45,2.10,13,direct_sp,0
+2020-01-01,120,dry_mass_drift_pct_per_day,-0.002,,13,direct_sp,0
 ```
 
 ---

@@ -35,6 +35,7 @@ import dask
 import numpy as np
 import pandas as pd
 import xarray as xr
+from tqdm import tqdm
 
 # Import physics metrics companion library
 from physmetrics_weather.physics_metrics import (
@@ -57,6 +58,8 @@ from physmetrics_weather.physics_metrics import (
     compute_geostrophic_imbalance,
     compute_hydrostatic_imbalance,
     compute_ke_spectrum,
+    compute_lapse_rate_wasserstein,
+    compute_q_spectrum,
     compute_spectral_scores,
     derive_surface_pressure,
     get_grid_cell_area,
@@ -72,14 +75,12 @@ warnings.filterwarnings("ignore", category=FutureWarning, message=".*prediction_
 
 DEFAULT_MODEL_ZARR: str = "gs://weatherbench2/datasets/aurora/2022-1440x721.zarr"
 REF_ZARR: str = (
-    "gs://weatherbench2/datasets/era5/"
-    "1959-2023_01_10-wb13-6h-1440x721_with_derived_variables.zarr"
+    "gs://weatherbench2/datasets/era5/1959-2023_01_10-wb13-6h-1440x721_with_derived_variables.zarr"
 )
 
 IFS_T0_ZARR: str = "gs://weatherbench2/datasets/hres_t0/2016-2022-6h-1440x721.zarr"
 IFS_T0_LOWRES_ZARR: str = (
-    "gs://weatherbench2/datasets/hres_t0/"
-    "2016-2022-6h-512x256_equiangular_conservative.zarr"
+    "gs://weatherbench2/datasets/hres_t0/2016-2022-6h-512x256_equiangular_conservative.zarr"
 )
 
 DEFAULT_OUTPUT_DIR: Path = Path.cwd() / "results"
@@ -139,6 +140,7 @@ class EvaluationConfig:
 # ============================================================================
 # Zarr I/O & Dataset Loading
 # ============================================================================
+
 
 def open_zarr_anonymous(url: str) -> xr.Dataset:
     """Open a public GCS Zarr store without authentication.
@@ -244,6 +246,7 @@ def _get_ps(
 # ============================================================================
 # Grid Alignment & Date Handling
 # ============================================================================
+
 
 def _grids_match(
     ds_a: xr.Dataset,
@@ -399,6 +402,7 @@ def _parse_lead_times(spec: str) -> List[Tuple[str, np.timedelta64]]:
 # Single Slice Evaluation Workhorse
 # ============================================================================
 
+
 def _evaluate_one(
     model_zarr_path: str,
     ref_zarr_path: str,
@@ -413,12 +417,7 @@ def _evaluate_one(
     model_name: str = "model",
     extended_spectra: bool = False,
     sp_ablation: str = "default",
-) -> Tuple[
-    List[Dict[str, Any]],
-    List[Dict[str, Any]],
-    List[Dict[str, Any]],
-    List[Dict[str, Any]]
-]:
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Fetch, preprocess, and evaluate physics metrics for one date and lead time slice.
 
     Args:
@@ -486,16 +485,18 @@ def _evaluate_one(
         ref_val: Any = None,
         ens_member: Any = 0,
     ) -> None:
-        summary_rows.append({
-            "date": date_str,
-            "lead_time_hours": lead_hours,
-            "metric_name": metric_name,
-            "model_value": model_val,
-            "ref_value": ref_val,
-            "n_levels": _n_levels,
-            "sp_method": _sp_method,
-            "ensemble_member": ens_member,
-        })
+        summary_rows.append(
+            {
+                "date": date_str,
+                "lead_time_hours": lead_hours,
+                "metric_name": metric_name,
+                "model_value": model_val,
+                "ref_value": ref_val,
+                "n_levels": _n_levels,
+                "sp_method": _sp_method,
+                "ensemble_member": ens_member,
+            }
+        )
 
     try:
         ds_model_t = None
@@ -530,8 +531,15 @@ def _evaluate_one(
 
             _NEEDED_VARS = set()
             var_tuples = (
-                T_NAMES, PHI_NAMES, U_NAMES, V_NAMES, Q_NAMES,
-                MSL_NAMES, SP_NAMES, T2M_NAMES, ZSFC_NAMES,
+                T_NAMES,
+                PHI_NAMES,
+                U_NAMES,
+                V_NAMES,
+                Q_NAMES,
+                MSL_NAMES,
+                SP_NAMES,
+                T2M_NAMES,
+                ZSFC_NAMES,
             )
             for names in var_tuples:
                 _NEEDED_VARS.update(names)
@@ -614,7 +622,7 @@ def _evaluate_one(
             _sp_method = "ref_sp"
 
     except (KeyError, ValueError, AttributeError, RuntimeError, OSError, IOError) as exc:
-        _log(f"    [{counter}] Data loading failed: {exc}")
+        _log(f"    [{counter}] Data loading failed for {date_str} ({lead_label}): {exc}")
         _append_summary("ERROR", None, None, ens_member=0)
         return summary_rows, ts_rows, spectrum_rows, lr_dist_rows
 
@@ -660,8 +668,11 @@ def _evaluate_one(
                                 ps_snap = ps_model
 
                             dry, water, energy = compute_conservation_scalars(
-                                snap, ps_snap, area_model, z_sfc=z_sfc_model,
-                                level_dim=model_level_dim_d
+                                snap,
+                                ps_snap,
+                                area_model,
+                                z_sfc=z_sfc_model,
+                                level_dim=model_level_dim_d,
                             )
                             step_sp_method = (
                                 ps_snap.attrs.get("derivation_method", "unknown")
@@ -673,15 +684,19 @@ def _evaluate_one(
                             step_sp_method = "failed"
 
                         try:
-                            hydro = float(compute_hydrostatic_imbalance(
-                                snap, area_model, level_dim=model_level_dim_d
-                            ))
+                            hydro = float(
+                                compute_hydrostatic_imbalance(
+                                    snap, area_model, level_dim=model_level_dim_d
+                                )
+                            )
                         except (ValueError, KeyError, AttributeError):
                             hydro = float("nan")
                         try:
-                            geo = float(compute_geostrophic_imbalance(
-                                snap, area_model, level_dim=model_level_dim_d
-                            ))
+                            geo = float(
+                                compute_geostrophic_imbalance(
+                                    snap, area_model, level_dim=model_level_dim_d
+                                )
+                            )
                         except (ValueError, KeyError, AttributeError):
                             geo = float("nan")
 
@@ -693,17 +708,19 @@ def _evaluate_one(
                         hydro_vals.append(hydro)
                         geo_vals.append(geo)
 
-                        ts_rows.append({
-                            "date": date_str,
-                            "forecast_hour": h,
-                            "dry_mass_Eg": dry,
-                            "water_mass_kg": water,
-                            "total_energy_J": energy,
-                            "hydrostatic_rmse": hydro,
-                            "geostrophic_rmse": geo,
-                            "sp_method": step_sp_method,
-                            "ensemble_member": m,
-                        })
+                        ts_rows.append(
+                            {
+                                "date": date_str,
+                                "forecast_hour": h,
+                                "dry_mass_Eg": dry,
+                                "water_mass_kg": water,
+                                "total_energy_J": energy,
+                                "hydrostatic_rmse": hydro,
+                                "geostrophic_rmse": geo,
+                                "sp_method": step_sp_method,
+                                "ensemble_member": m,
+                            }
+                        )
 
                     hours_model_arr = np.array(hours_model)
                     dry_vals_arr = np.array(dry_vals)
@@ -714,15 +731,15 @@ def _evaluate_one(
                     if ds_ref_t is not None:
                         ref_ld = _detect_level_dim(ds_ref_t)
                         try:
-                            ref_hydro = float(compute_hydrostatic_imbalance(
-                                ds_ref_t, area, level_dim=ref_ld
-                            ))
+                            ref_hydro = float(
+                                compute_hydrostatic_imbalance(ds_ref_t, area, level_dim=ref_ld)
+                            )
                         except (ValueError, KeyError, AttributeError):
                             pass
                         try:
-                            ref_geo = float(compute_geostrophic_imbalance(
-                                ds_ref_t, area, level_dim=ref_ld
-                            ))
+                            ref_geo = float(
+                                compute_geostrophic_imbalance(ds_ref_t, area, level_dim=ref_ld)
+                            )
                         except (ValueError, KeyError, AttributeError):
                             pass
 
@@ -789,9 +806,7 @@ def _evaluate_one(
                     e_pred_c = e_pred[:n_min]
                     e_ref_c = e_ref[:n_min]
 
-                    eff_res_out = _find_effective_resolution(
-                        k_common, e_pred_c, e_ref_c
-                    )
+                    eff_res_out = _find_effective_resolution(k_common, e_pred_c, e_ref_c)
                     L_eff, ratio = (
                         eff_res_out
                         if isinstance(eff_res_out, tuple)
@@ -806,15 +821,65 @@ def _evaluate_one(
                     _append_summary("spectral_residual", s_res, None, ens_member=m)
 
                     for wi in range(n_min):
-                        spectrum_rows.append({
-                            "date": date_str,
-                            "lead_hours": lead_hours,
-                            "variable": "KE",
-                            "wavenumber": int(k_pred[wi]),
-                            "power_pred": float(e_pred[wi]),
-                            "power_ref": float(e_ref[wi]),
-                            "ensemble_member": m,
-                        })
+                        spectrum_rows.append(
+                            {
+                                "date": date_str,
+                                "lead_hours": lead_hours,
+                                "variable": "KE_500",
+                                "wavenumber": int(k_pred[wi]),
+                                "power_pred": float(e_pred[wi]),
+                                "power_ref": float(e_ref[wi]),
+                                "ensemble_member": m,
+                            }
+                        )
+
+                    # Environmental Lapse Rate Wasserstein Distance
+                    try:
+                        lr_results = compute_lapse_rate_wasserstein(
+                            ds_model_m, ds_ref_aligned, area_model
+                        )
+                        for band_key, w1_val in lr_results.items():
+                            _append_summary(band_key, w1_val, None, ens_member=m)
+                    except (ValueError, KeyError, AttributeError) as exc:
+                        _log(f"    [{counter}] Lapse rate evaluation failed: {exc}")
+
+                    # Extended Spectra (Q at 500hPa & KE at 850hPa)
+                    if extended_spectra:
+                        try:
+                            kq_pred, sq_pred = compute_q_spectrum(ds_model_m, level=500.0)
+                            kq_ref, sq_ref = compute_q_spectrum(ds_ref_aligned, level=500.0)
+                            nq_min = min(len(sq_pred), len(sq_ref))
+                            for wi in range(nq_min):
+                                spectrum_rows.append(
+                                    {
+                                        "date": date_str,
+                                        "lead_hours": lead_hours,
+                                        "variable": "Q_500",
+                                        "wavenumber": int(kq_pred[wi]),
+                                        "power_pred": float(sq_pred[wi]),
+                                        "power_ref": float(sq_ref[wi]),
+                                        "ensemble_member": m,
+                                    }
+                                )
+
+                            kke850_p, e850_p = compute_ke_spectrum(ds_model_m, level=850.0)
+                            kke850_r, e850_r = compute_ke_spectrum(ds_ref_aligned, level=850.0)
+                            n850_min = min(len(e850_p), len(e850_r))
+                            for wi in range(n850_min):
+                                spectrum_rows.append(
+                                    {
+                                        "date": date_str,
+                                        "lead_hours": lead_hours,
+                                        "variable": "KE_850",
+                                        "wavenumber": int(kke850_p[wi]),
+                                        "power_pred": float(e850_p[wi]),
+                                        "power_ref": float(e850_r[wi]),
+                                        "ensemble_member": m,
+                                    }
+                                )
+                        except (ValueError, KeyError, AttributeError) as exc:
+                            _log(f"    [{counter}] Extended spectra failed: {exc}")
+
                 except (ValueError, KeyError, AttributeError) as exc:
                     _log(f"    [{counter}] Spectral evaluation failed for member {m}: {exc}")
 
@@ -827,6 +892,7 @@ def _evaluate_one(
 # ============================================================================
 # Object-Oriented Evaluation Pipeline
 # ============================================================================
+
 
 class EvaluationPipeline:
     """Object-oriented execution pipeline for physics metric evaluations."""
@@ -886,11 +952,31 @@ class EvaluationPipeline:
                 )
                 futures[fut] = (idx, date_str, lead_label)
 
-            for fut in as_completed(futures):
+            completed_futures = as_completed(futures)
+            if self.config.verbose and tqdm is not None:
+                completed_futures = tqdm(
+                    completed_futures,
+                    total=n_combos,
+                    desc="Evaluating physics metrics",
+                    unit="eval",
+                )
+
+            for fut in completed_futures:
                 idx, date_str, lead_label = futures[fut]
                 try:
                     res = fut.result(timeout=TASK_TIMEOUT)
                     summary_rows, ts_rows, spectrum_rows, lr_dist_rows = res
+                    for r in summary_rows:
+                        if r.get("metric_name") == "ERROR" and self.config.verbose:
+                            err_msg = (
+                                f"  ⚠ Data loading failed for {date_str} ({lead_label}). "
+                                f"Verify that {date_str} exists in your prediction "
+                                f"and reference Zarr stores."
+                            )
+                            if tqdm is not None:
+                                tqdm.write(err_msg)
+                            else:
+                                print(err_msg)
                     all_rows.extend(summary_rows)
                     all_ts_rows.extend(ts_rows)
                     all_spectrum_rows.extend(spectrum_rows)
@@ -898,25 +984,33 @@ class EvaluationPipeline:
                 except TimeoutError:
                     if self.config.verbose:
                         print(
-                            f"  ⚠ Task {idx} ({date_str} {lead_label}) "
+                            f"\n  ⚠ Task {idx} ({date_str} {lead_label}) "
                             f"timed out after {TASK_TIMEOUT}s."
                         )
                 except (
-                    KeyError, ValueError, AttributeError,
-                    RuntimeError, OSError, IOError
+                    KeyError,
+                    ValueError,
+                    AttributeError,
+                    RuntimeError,
+                    OSError,
+                    IOError,
                 ) as exc:
                     if self.config.verbose:
-                        print(f"  ⚠ Worker exception (task {idx}): {exc}")
+                        print(f"\n  ⚠ Worker exception (task {idx}): {exc}")
 
         if not all_rows:
             if self.config.verbose:
                 print("\n  ⚠ No successful results obtained.")
             return pd.DataFrame()
 
-        all_rows.sort(key=lambda r: (
-            r["date"], r["lead_time_hours"], r["metric_name"],
-            r.get("ensemble_member", 0)
-        ))
+        all_rows.sort(
+            key=lambda r: (
+                r["date"],
+                r["lead_time_hours"],
+                r["metric_name"],
+                r.get("ensemble_member", 0),
+            )
+        )
         df = pd.DataFrame(all_rows)
         self.config.output_csv.parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(self.config.output_csv, index=False)
@@ -927,15 +1021,27 @@ class EvaluationPipeline:
         if all_ts_rows:
             year_str = self.config.dates[0][:4] if self.config.dates else "unknown"
             ts_csv = (
-                self.config.output_csv.parent /
-                f"time_series_{self.config.model_name}_{year_str}.csv"
+                self.config.output_csv.parent
+                / f"time_series_{self.config.model_name}_{year_str}.csv"
             )
             df_ts = pd.DataFrame(all_ts_rows)
-            df_ts.drop_duplicates(subset=["date", "forecast_hour", "ensemble_member"], inplace=True)
+            df_ts.drop_duplicates(
+                subset=["date", "forecast_hour", "ensemble_member"], inplace=True
+            )
             df_ts.sort_values(["date", "forecast_hour", "ensemble_member"], inplace=True)
             df_ts.to_csv(ts_csv, index=False)
             if self.config.verbose:
                 print(f"  ✓ Time series saved → {ts_csv} ({len(df_ts)} rows)")
+
+        if all_spectrum_rows:
+            year_str = self.config.dates[0][:4] if self.config.dates else "unknown"
+            spectra_csv = (
+                self.config.output_csv.parent / f"spectra_{self.config.model_name}_{year_str}.csv"
+            )
+            df_spec = pd.DataFrame(all_spectrum_rows)
+            df_spec.to_csv(spectra_csv, index=False)
+            if self.config.verbose:
+                print(f"  ✓ Spectra saved → {spectra_csv} ({len(df_spec)} rows)")
 
         return df
 
@@ -995,68 +1101,68 @@ def run_evaluation(
 # CLI Command Entrypoint
 # ============================================================================
 
+
 def main() -> None:
     """CLI entrypoint for physmetrics-run command."""
     parser = argparse.ArgumentParser(
         description="Physics evaluation for AI weather models (WB2 Zarr streaming)"
     )
+    parser.add_argument("--year", type=int, default=2022, help="Year to evaluate (default: 2022).")
     parser.add_argument(
-        "--year", type=int, default=2022, help="Year to evaluate (default: 2022)."
+        "--dates", nargs="+", default=None, help="Dates to evaluate (e.g. 2022-01-01 2022-01-15)."
     )
     parser.add_argument(
-        "--dates", nargs="+", default=None,
-        help="Dates to evaluate (e.g. 2022-01-01 2022-01-15)."
+        "--month", type=str, default=None, help="Evaluate all days of month (e.g. 2022-01)."
     )
     parser.add_argument(
-        "--month", type=str, default=None,
-        help="Evaluate all days of month (e.g. 2022-01)."
+        "--workers",
+        type=int,
+        default=DEFAULT_WORKERS,
+        help=f"Worker process count (default: {DEFAULT_WORKERS}).",
+    )
+    parser.add_argument("--output", type=str, default=None, help="Output CSV file path.")
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=str(DEFAULT_OUTPUT_DIR),
+        help="Output directory for generated CSV files.",
     )
     parser.add_argument(
-        "--workers", type=int, default=DEFAULT_WORKERS,
-        help=f"Worker process count (default: {DEFAULT_WORKERS})."
-    )
-    parser.add_argument(
-        "--output", type=str, default=None, help="Output CSV file path."
-    )
-    parser.add_argument(
-        "--output-dir", type=str, default=str(DEFAULT_OUTPUT_DIR),
-        help="Output directory for generated CSV files."
-    )
-    parser.add_argument(
-        "--mode", type=str,
+        "--mode",
+        type=str,
         choices=["joint", "ref", "reference", "prediction", "model"],
-        default="joint", help="Evaluation mode."
+        default="joint",
+        help="Evaluation mode.",
+    )
+    parser.add_argument("--model", type=str, default="model", help="Model identifier name.")
+    parser.add_argument(
+        "--prediction-zarr",
+        type=str,
+        default=DEFAULT_MODEL_ZARR,
+        help="Path/URL to prediction Zarr.",
     )
     parser.add_argument(
-        "--model", type=str, default="model", help="Model identifier name."
+        "--ref-zarr", type=str, default=REF_ZARR, help="Path/URL to reference Zarr."
     )
     parser.add_argument(
-        "--prediction-zarr", type=str, default=DEFAULT_MODEL_ZARR,
-        help="Path/URL to prediction Zarr."
+        "--lead-times",
+        type=str,
+        default=None,
+        help="Comma-separated lead times (e.g. '12h,5d,10d').",
     )
     parser.add_argument(
-        "--ref-zarr", type=str, default=REF_ZARR,
-        help="Path/URL to reference Zarr."
+        "--static-zarr", type=str, default=None, help="Path/URL to static fields Zarr."
+    )
+    parser.add_argument("--quiet", action="store_true", help="Suppress output logging.")
+    parser.add_argument(
+        "--extended-spectra", action="store_true", help="Compute additional spectra."
     )
     parser.add_argument(
-        "--lead-times", type=str, default=None,
-        help="Comma-separated lead times (e.g. '12h,5d,10d')."
-    )
-    parser.add_argument(
-        "--static-zarr", type=str, default=None,
-        help="Path/URL to static fields Zarr."
-    )
-    parser.add_argument(
-        "--quiet", action="store_true", help="Suppress output logging."
-    )
-    parser.add_argument(
-        "--extended-spectra", action="store_true",
-        help="Compute additional spectra."
-    )
-    parser.add_argument(
-        "--sp-ablation", type=str,
+        "--sp-ablation",
+        type=str,
         choices=["default", "hypsometric", "ref_sp", "dry_hydro"],
-        default="default", help="SP derivation ablation mode."
+        default="default",
+        help="SP derivation ablation mode.",
     )
 
     args = parser.parse_args()

@@ -3,6 +3,9 @@ Usage Guide
 
 ``physmetrics-weather`` provides both command-line interface (CLI) utilities and a Python object-oriented API for metric calculation and visualization.
 
+.. note::
+   **Execution Time Notice**: Evaluating a full 365-day year across multiple forecast lead horizons involves streaming data and computing 3D integrations and spherical harmonic spectra for over 1,000 data slices. A full-year run can take several hours depending on network bandwidth and parallel CPU workers. For quick tests and examples, use ``--dates 2020-01-01 2020-01-02``.
+
 1. Command-Line Interface (CLI)
 -------------------------------
 
@@ -18,8 +21,8 @@ The ``physmetrics-run`` command streams model predictions and reference datasets
 Key CLI Options:
 
 * ``--year INTEGER``: Year to evaluate (default: 2022).
-* ``--dates STRING [STRING ...]``: Specific ISO dates to evaluate (e.g. ``2022-01-01 2022-01-15``).
-* ``--month STRING``: Evaluate all days of a month (e.g. ``2022-01``).
+* ``--dates STRING [STRING ...]``: Specific ISO dates to evaluate (e.g. ``2020-01-01 2020-01-02``).
+* ``--month STRING``: Evaluate all days of a month (e.g. ``2020-01``).
 * ``--prediction-zarr STRING``: Path or GCS URL to model prediction Zarr dataset.
 * ``--ref-zarr STRING``: Path or GCS URL to reference ground truth Zarr dataset.
 * ``--lead-times STRING``: Comma-separated list of target lead times (default: ``12h,5d,10d``).
@@ -35,7 +38,7 @@ CLI Example:
    physmetrics-run \
      --prediction-zarr gs://weatherbench2/datasets/aurora/2022-1440x721.zarr \
      --model aurora \
-     --dates 2022-01-01 2022-01-15 \
+     --dates 2020-01-01 2020-01-02 \
      --output-dir ./results
 
 Generating Visualizations (physmetrics-plot)
@@ -62,10 +65,10 @@ Use ``EvaluationConfig`` and ``EvaluationPipeline`` to run evaluation workflows 
 
    # 1. Define configuration settings
    config = EvaluationConfig(
-       dates=["2022-01-01", "2022-01-02"],
+       dates=["2020-01-01", "2020-01-02"],
        prediction_zarr="gs://weatherbench2/datasets/aurora/2022-1440x721.zarr",
        model_name="aurora",
-       output_csv=Path("./results/physics_evaluation_aurora_2022.csv"),
+       output_csv=Path("./results/physics_evaluation_aurora_2020.csv"),
        workers=4,
    )
 

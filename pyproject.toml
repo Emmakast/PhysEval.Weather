@@ -23,7 +23,8 @@ dependencies = [
     "scipy",
     "zarr",
     "gcsfs",
-    "pyshtools"
+    "pyshtools",
+    "tqdm"
 ]
 
 [project.optional-dependencies]
