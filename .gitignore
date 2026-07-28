@@ -1,0 +1,42 @@
+# Python Bytecode and Cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Environments & Packages
+.venv/
+venv/
+env/
+ENV/
+
+# Build & Distribution Artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+MANIFEST
+
+# Pytest & Coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Sphinx Documentation Build Outputs
+docs/_build/
+
+# Benchmark Output Directories & Temporary Results
+results/
+plots/
+
+# Jupyter Notebook Checkpoints
+.ipynb_checkpoints/
+
+# IDEs & System Files
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
