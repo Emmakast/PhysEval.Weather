@@ -15,9 +15,9 @@ Ensemble / Probabilistic Model Support:
     identifier (defaulting to 0 for deterministic models).
 
 Usage:
-    physeval-run --year 2022
-    physeval-run --dates 2022-01-01 2022-01-02 --workers 4
-    physeval-run --prediction-zarr <path_to_zarr> --output-dir ./results
+    physmetrics-run --year 2022
+    physmetrics-run --dates 2022-01-01 2022-01-02 --workers 4
+    physmetrics-run --prediction-zarr <path_to_zarr> --output-dir ./results
 """
 
 from __future__ import annotations
@@ -863,7 +863,7 @@ def run_evaluation(
 # ============================================================================
 
 def main() -> None:
-    """CLI entrypoint for physeval-run command."""
+    """CLI entrypoint for physmetrics-run command."""
     parser = argparse.ArgumentParser(
         description="Physics evaluation for AI weather models (WB2 Zarr streaming)"
     )

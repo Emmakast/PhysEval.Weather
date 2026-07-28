@@ -1,4 +1,4 @@
-"""PhysEval-Weather: Physical consistency evaluation framework for AI Weather Prediction models.
+"""PhysMetrics.Weather: Physical consistency evaluation framework for AI Weather Prediction models.
 """
 
 from physmetrics_weather.physics_metrics import (

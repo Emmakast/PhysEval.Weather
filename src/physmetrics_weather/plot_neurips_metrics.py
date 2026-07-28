@@ -13,7 +13,7 @@ Ensemble Support:
     initialization dates.
 
 Usage:
-    physeval-plot --results-dir ./results --outdir ./plots
+    physmetrics-plot --results-dir ./results --outdir ./plots
 """
 
 from __future__ import annotations
@@ -357,7 +357,7 @@ def plot_spectra(
 # ============================================================================
 
 def main() -> None:
-    """CLI entrypoint for physeval-plot command."""
+    """CLI entrypoint for physmetrics-plot command."""
     parser = argparse.ArgumentParser(description="Generate diagnostic plots for physics metrics")
     parser.add_argument("--results-dir", type=str, default=str(Path.cwd() / "results"), help="Path to results directory.")
     parser.add_argument("--outdir", type=str, default=str(Path.cwd() / "plots"), help="Path to output plots directory.")

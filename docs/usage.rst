@@ -1,19 +1,19 @@
 Usage Guide
 ===========
 
-``physeval-weather`` provides two command-line interface (CLI) utilities: ``physeval-run`` for evaluation streaming and metric calculation, and ``physeval-plot`` for visualization.
+``physmetrics-weather`` provides two command-line interface (CLI) utilities: ``physmetrics-run`` for evaluation streaming and metric calculation, and ``physmetrics-plot`` for visualization.
 
-Running Metric Evaluation (physeval-run)
-----------------------------------------
+Running Metric Evaluation (physmetrics-run)
+-------------------------------------------
 
-The ``physeval-run`` command streams model predictions and reference datasets, evaluating all 8 physical metrics.
+The ``physmetrics-run`` command streams model predictions and reference datasets, evaluating all physical metrics.
 
 Command Syntax
 ~~~~~~~~~~~~~~
 
 .. code-block:: bash
 
-   physeval-run [OPTIONS]
+   physmetrics-run [OPTIONS]
 
 Key Options
 ~~~~~~~~~~~
@@ -36,28 +36,28 @@ Evaluate single model over specific dates:
 
 .. code-block:: bash
 
-   physeval-run --dates 2022-01-01 2022-01-15 --model aurora --workers 4
+   physmetrics-run --dates 2022-01-01 2022-01-15 --model aurora --workers 4
 
 Evaluate custom Zarr prediction dataset:
 
 .. code-block:: bash
 
-   physeval-run \
+   physmetrics-run \
      --prediction-zarr gs://weatherbench2/datasets/aurora/2022-1440x721.zarr \
      --model aurora \
      --output-dir ./results
 
-Generating Visualizations (physeval-plot)
------------------------------------------
+Generating Visualizations (physmetrics-plot)
+--------------------------------------------
 
-The ``physeval-plot`` command reads the generated long-format CSV files and renders publication-ready plots.
+The ``physmetrics-plot`` command reads the generated long-format CSV files and renders publication-ready plots.
 
 Command Syntax
 ~~~~~~~~~~~~~~
 
 .. code-block:: bash
 
-   physeval-plot --results-dir ./results --outdir ./plots
+   physmetrics-plot --results-dir ./results --outdir ./plots
 
 Key Options
 ~~~~~~~~~~~

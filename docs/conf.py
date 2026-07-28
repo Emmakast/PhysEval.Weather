@@ -1,4 +1,4 @@
-"""Sphinx configuration for PhysEval-Weather documentation."""
+"""Sphinx configuration for PhysMetrics.Weather documentation."""
 
 import os
 import sys
@@ -7,9 +7,9 @@ from pathlib import Path
 # Add src/ directory to sys.path so autodoc can discover physmetrics_weather
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
-project = "PhysEval-Weather"
-copyright = "2026, PhysMetrics Team"
-author = "PhysMetrics Team"
+project = "PhysMetrics.Weather"
+copyright = "2026, Emma Kasteleyn and Timo Maier"
+author = "Emma Kasteleyn and Timo Maier"
 release = "0.1.0"
 
 extensions = [

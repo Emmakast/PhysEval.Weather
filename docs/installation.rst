@@ -1,7 +1,7 @@
 Installation Guide
 ==================
 
-This guide describes how to install ``physeval-weather`` using ``pip``, ``uv``, or directly from source.
+This guide describes how to install ``physmetrics-weather`` using ``pip``, ``uv``, or directly from source.
 
 Requirements
 ------------
@@ -16,30 +16,30 @@ Once published on PyPI, install the latest release using ``pip``:
 
 .. code-block:: bash
 
-   pip install physeval-weather
+   pip install physmetrics-weather
 
 To install with development and documentation tools:
 
 .. code-block:: bash
 
-   pip install "physeval-weather[dev,docs]"
+   pip install "physmetrics-weather[dev,docs]"
 
 Installing via uv
 -----------------
 
 `uv <https://github.com/astral-sh/uv>`_ is a fast Python package installer and resolution tool.
 
-To install ``physeval-weather`` into your virtual environment with ``uv``:
+To install ``physmetrics-weather`` into your virtual environment with ``uv``:
 
 .. code-block:: bash
 
-   uv pip install physeval-weather
+   uv pip install physmetrics-weather
 
 Or add it to your project dependencies:
 
 .. code-block:: bash
 
-   uv add physeval-weather
+   uv add physmetrics-weather
 
 Installing from Source
 ----------------------

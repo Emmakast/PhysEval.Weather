@@ -1,7 +1,7 @@
-PhysEval-Weather Documentation
-=====================================
+PhysMetrics.Weather Documentation
+======================================
 
-**PhysEval-Weather** is a comprehensive Python framework designed to evaluate the physical consistency, spectral resolution, and conservation properties of Machine Learning Weather Prediction (MLWP) models.
+**PhysMetrics.Weather** is a comprehensive Python framework designed to evaluate the physical consistency, spectral resolution, and conservation properties of Machine Learning Weather Prediction (MLWP) models.
 
 Key Features
 ------------

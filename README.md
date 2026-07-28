@@ -1,4 +1,4 @@
-# PhysEval-Weather (physeval-weather)
+# PhysMetrics.Weather (physmetrics-weather)
 
 An open-source, unified framework for evaluating the **physical consistency**, **spectral resolution**, and **atmospheric balance** of Machine Learning Weather Prediction (MLWP) models.
 
@@ -56,18 +56,18 @@ source .venv/bin/activate   # Linux / macOS
 pip install -e .
 ```
 
-After installation, the CLI commands `physeval-run` and `physeval-plot` are available on your system `PATH`:
+After installation, the CLI commands `physmetrics-run` and `physmetrics-plot` are available on your system `PATH`:
 
 | Command | Description |
 |---|---|
-| `physeval-run` | Stream WeatherBench 2 Zarr data, run physics metrics, output long-format CSV |
-| `physeval-plot` | Generate publication-ready figures and visualization plots from output CSVs |
+| `physmetrics-run` | Stream WeatherBench 2 Zarr data, run physics metrics, output long-format CSV |
+| `physmetrics-plot` | Generate publication-ready figures and visualization plots from output CSVs |
 
 ---
 
 ## Probabilistic & Ensemble Model Support
 
-`physeval-weather` automatically detects extra ensemble dimensions in your datasets (e.g. `ens`, `realization`, `member`, `ensemble`, `number`).
+`physmetrics-weather` automatically detects extra ensemble dimensions in your datasets (e.g. `ens`, `realization`, `member`, `ensemble`, `number`).
 
 * **Per-Member Evaluation**: Metrics are computed for each individual ensemble member.
 * **Output Format**: The resulting long-format CSV includes an `ensemble_member` column (`0` for deterministic models, or member ID `0, 1, 2, ...` for ensemble realizations).
@@ -82,7 +82,7 @@ Stream data directly from public WeatherBench 2 Google Cloud Storage buckets:
 
 ```bash
 # Evaluate Pangu-Weather predictions against ERA5 for 2022
-physeval-run \
+physmetrics-run \
   --model pangu \
   --prediction-zarr gs://weatherbench2/datasets/pangu/2018-2022_0012_0p25.zarr \
   --year 2022 \
@@ -95,7 +95,7 @@ physeval-run \
 Point `--prediction-zarr` at any local or cloud Zarr store:
 
 ```bash
-physeval-run \
+physmetrics-run \
   --model my_model \
   --prediction-zarr /path/to/my_model_forecasts.zarr \
   --output-dir ./results
@@ -113,7 +113,7 @@ Required variable names (or standard aliases):
 
 ## CLI Options
 
-### `physeval-run`
+### `physmetrics-run`
 
 | Option | Default | Description |
 |---|---|---|
@@ -129,10 +129,10 @@ Required variable names (or standard aliases):
 | `--extended-spectra` | off | Also compute 850 hPa KE spectrum and Q spectrum |
 | `--quiet` | off | Suppress verbose logging |
 
-### `physeval-plot`
+### `physmetrics-plot`
 
 ```bash
-physeval-plot --results-dir ./results --outdir ./plots
+physmetrics-plot --results-dir ./results --outdir ./plots
 ```
 
 | Option | Default | Description |
@@ -145,7 +145,7 @@ physeval-plot --results-dir ./results --outdir ./plots
 
 ## Output CSV Format
 
-`physeval-run` outputs long-format CSV files with the following structure:
+`physmetrics-run` outputs long-format CSV files with the following structure:
 
 ```csv
 date,lead_time_hours,metric_name,model_value,ref_value,n_levels,sp_method,ensemble_member

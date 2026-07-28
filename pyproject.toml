@@ -41,8 +41,8 @@ docs = [
 ]
 
 [project.scripts]
-physeval-run = "physmetrics_weather.run_all_metrics:main"
-physeval-plot = "physmetrics_weather.plot_neurips_metrics:main"
+physmetrics-run = "physmetrics_weather.run_all_metrics:main"
+physmetrics-plot = "physmetrics_weather.plot_neurips_metrics:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

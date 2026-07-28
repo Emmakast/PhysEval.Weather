@@ -44,7 +44,7 @@ Evaluating Deterministic Models via Python API
 Evaluating Probabilistic / Ensemble Models
 -------------------------------------------
 
-When an dataset contains an ensemble dimension (e.g., ``"ens"``, ``"realization"``, or ``"member"``), ``physmetrics_weather`` automatically evaluates metrics across each ensemble member.
+When a dataset contains an ensemble dimension (e.g., ``"ens"``, ``"realization"``, or ``"member"``), ``physmetrics_weather`` automatically evaluates metrics across each ensemble member.
 
 .. code-block:: python
 
@@ -70,7 +70,7 @@ To run an ensemble dataset evaluation via CLI:
 
 .. code-block:: bash
 
-   physeval-run \
+   physmetrics-run \
      --prediction-zarr /path/to/ensemble_forecast.zarr \
      --model my_ensemble_model \
      --dates 2022-01-01 \
