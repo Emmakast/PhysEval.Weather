@@ -412,6 +412,7 @@ def _evaluate_one(
     static_zarr_path: Optional[str] = None,
     model_name: str = "model",
     extended_spectra: bool = False,
+    sp_ablation: str = "default",
 ) -> Tuple[
     List[Dict[str, Any]],
     List[Dict[str, Any]],
