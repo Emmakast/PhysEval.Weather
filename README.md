@@ -1,4 +1,4 @@
-# PhysMetrics.Weather (physmetrics-weather)
+# PhysMetrics.Weather
 
 An open-source, unified framework for evaluating the **physical consistency**, **spectral resolution**, and **atmospheric balance** of Machine Learning Weather Prediction (MLWP) models.
 
