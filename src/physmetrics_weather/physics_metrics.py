@@ -1,28 +1,37 @@
-"""
-Physics Metrics Library — Verification checks for weather models
+"""Physics Metrics Library for Weather Model Evaluation.
 
-Contains 8 diagnostic metrics for evaluating an AI weather model:
+This module provides diagnostic physical metrics for evaluating AI weather prediction
+models, including mass, water, and energy conservation, spectral resolution, and
+atmospheric balance metrics.
 
-  1. Global Dry Air Mass  (conservation)
-  2. Global Water Mass    (stability)
-  3. Global Total Energy  (stability)
-  4. Effective Resolution (spectral)
-  5. Spectral divergence  (spectral)
-  6. Spectral residual    (spectral)
-  7. Hydrostatic Balance  (balance)
-  8. Geostrophic Balance  (balance)
+Supported Metrics:
+    1. Global Dry Air Mass (conservation)
+    2. Global Water Mass (stability)
+    3. Global Total Energy (stability)
+    4. Kinetic Energy / Humidity Spectra & Effective Resolution (spectral)
+    5. Spectral Divergence & Residual (spectral)
+    6. Hydrostatic Balance (balance)
+    7. Geostrophic Balance (balance)
+    8. Environmental Lapse Rate Wasserstein Distance (thermal structure)
 
-Compatible with WeatherBench 2 variable naming.
+Ensemble Support:
+    All metric functions automatically detect extra ensemble dimensions
+    (e.g., 'ens', 'realization', 'member', 'ensemble', 'number'). When an ensemble
+    dimension is present, calculations are performed per ensemble member or across
+    the member axis, returning dictionary mappings or data structures containing
+    per-member metric evaluations.
 
-Dependencies: numpy, xarray, pyshtools.
+Dependencies:
+    numpy, pandas, xarray, scipy, pyshtools.
 """
 
 from __future__ import annotations
 
 import warnings
-from typing import Optional
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
+import pyshtools as pysh
 import xarray as xr
 from scipy.stats import linregress, wasserstein_distance
 
@@ -31,49 +40,68 @@ from scipy.stats import linregress, wasserstein_distance
 # Physical Constants
 # ============================================================================
 
-GRAVITY = 9.80665           # m/s²  – standard gravity
-EARTH_RADIUS = 6.371e6      # m     – mean Earth radius
-C_PD = 1004.64              # J/(kg·K) – dry air specific heat (const. pressure)
-C_PV = 1810.0               # J/(kg·K) – water vapour specific heat (const. pressure)
-L_V = 2.501e6               # J/kg  – latent heat of vaporisation (at 0 °C)
-R_DRY = 287.05              # J/(kg·K) – specific gas constant, dry air
-LAPSE_RATE = 0.0065         # K/m   – standard tropospheric lapse rate
-OMEGA = 7.2921e-5           # rad/s – Earth angular velocity
-EXAGRAM = 1e18              # kg    – conversion factor to Exagrams
-R_V = 461.5                 # J/(kg·K) – specific gas constant, water vapor
+GRAVITY: float = 9.80665           # m/s²  – standard gravity
+EARTH_RADIUS: float = 6.371e6      # m     – mean Earth radius
+C_PD: float = 1004.64              # J/(kg·K) – dry air specific heat (const. pressure)
+C_PV: float = 1810.0               # J/(kg·K) – water vapour specific heat (const. pressure)
+L_V: float = 2.501e6               # J/kg  – latent heat of vaporisation (at 0 °C)
+R_DRY: float = 287.05              # J/(kg·K) – specific gas constant, dry air
+LAPSE_RATE: float = 0.0065         # K/m   – standard tropospheric lapse rate
+OMEGA: float = 7.2921e-5           # rad/s – Earth angular velocity
+EXAGRAM: float = 1e18              # kg    – conversion factor to Exagrams
+R_V: float = 461.5                 # J/(kg·K) – specific gas constant, water vapor
 
 
 # ============================================================================
-# Variable Names
+# Variable & Dimension Names
 # ============================================================================
+
+SP_NAMES: Tuple[str, ...] = ("surface_pressure", "sp", "ps")
+MSL_NAMES: Tuple[str, ...] = ("mean_sea_level_pressure", "msl")
+Q_NAMES: Tuple[str, ...] = ("specific_humidity", "q")
+T_NAMES: Tuple[str, ...] = ("temperature", "t")
+U_NAMES: Tuple[str, ...] = ("u_component_of_wind", "u")
+V_NAMES: Tuple[str, ...] = ("v_component_of_wind", "v")
+PHI_NAMES: Tuple[str, ...] = ("geopotential", "z")
+T2M_NAMES: Tuple[str, ...] = ("2m_temperature", "t2m")
+ZSFC_NAMES: Tuple[str, ...] = ("geopotential_at_surface", "z_sfc", "orography")
+
+LEVEL_DIM_NAMES: Tuple[str, ...] = ("level", "pressure_level", "plev", "isobaricInhPa")
+PRED_TD_NAMES: Tuple[str, ...] = ("prediction_timedelta", "lead_time", "step", "timedelta")
+ENSEMBLE_DIM_NAMES: Tuple[str, ...] = ("ens", "realization", "member", "ensemble", "number")
+
 
 def _find_var(
     ds: xr.Dataset,
-    candidates: tuple[str, ...],
+    candidates: Tuple[str, ...],
 ) -> Optional[str]:
-    """Return the first variable name found in *ds*, or ``None``."""
+    """Find the first variable name matching any candidate in the dataset.
+
+    Args:
+        ds: Input xarray Dataset.
+        candidates: Tuple of variable name strings to search for.
+
+    Returns:
+        The matching variable name string if found, otherwise None.
+    """
     for name in candidates:
         if name in ds.data_vars:
             return name
     return None
 
 
-SP_NAMES = ("surface_pressure", "sp", "ps")
-MSL_NAMES = ("mean_sea_level_pressure", "msl")
-Q_NAMES = ("specific_humidity", "q")
-T_NAMES = ("temperature", "t")
-U_NAMES = ("u_component_of_wind", "u")
-V_NAMES = ("v_component_of_wind", "v")
-PHI_NAMES = ("geopotential", "z")
-T2M_NAMES = ("2m_temperature", "t2m")
-ZSFC_NAMES = ("geopotential_at_surface", "z_sfc", "orography")
+def _detect_level_dim(ds: Union[xr.Dataset, xr.DataArray]) -> str:
+    """Auto-detect the name of the pressure-level dimension.
 
-LEVEL_DIM_NAMES = ("level", "pressure_level", "plev", "isobaricInhPa")
-PRED_TD_NAMES = ("prediction_timedelta", "lead_time", "step", "timedelta")
+    Args:
+        ds: Input xarray Dataset or DataArray.
 
+    Returns:
+        Name of the detected level dimension.
 
-def _detect_level_dim(ds: xr.Dataset) -> str:
-    """Auto-detect the name of the pressure-level dimension."""
+    Raises:
+        ValueError: If no pressure-level dimension is found.
+    """
     for name in LEVEL_DIM_NAMES:
         if name in ds.dims:
             return name
@@ -83,36 +111,72 @@ def _detect_level_dim(ds: xr.Dataset) -> str:
     )
 
 
-def _detect_pred_td_dim(ds: xr.Dataset) -> Optional[str]:
-    """Auto-detect the name of the prediction_timedelta dimension."""
+def _detect_pred_td_dim(ds: Union[xr.Dataset, xr.DataArray]) -> Optional[str]:
+    """Auto-detect the name of the prediction timedelta dimension.
+
+    Args:
+        ds: Input xarray Dataset or DataArray.
+
+    Returns:
+        Name of the detected prediction timedelta dimension, or None if absent.
+    """
     for name in PRED_TD_NAMES:
         if name in ds.dims:
             return name
     return None
 
 
+def _detect_ensemble_dim(ds: Union[xr.Dataset, xr.DataArray]) -> Optional[str]:
+    """Auto-detect the name of the ensemble dimension.
+
+    Args:
+        ds: Input xarray Dataset or DataArray.
+
+    Returns:
+        Name of the ensemble dimension if present, or None if deterministic.
+    """
+    for name in ENSEMBLE_DIM_NAMES:
+        if name in ds.dims:
+            return name
+    return None
+
+
 # ============================================================================
-# Grids
+# Grid & Coordinate Utilities
 # ============================================================================
 
 def get_grid_cell_area(
-    ds: xr.Dataset,
+    ds: Union[xr.Dataset, xr.DataArray],
     lat_name: str = "latitude",
     lon_name: str = "longitude",
     earth_radius: float = EARTH_RADIUS,
 ) -> xr.DataArray:
-    """
-    Area of each grid cell on a regular lat/lon grid (m²).
+    """Compute the area of each grid cell on a regular latitude/longitude grid.
 
-    A_i = R² × Δλ × |sin(φ_north) − sin(φ_south)|
+    Formula:
+        A_i = R² × Δλ × abs(sin(φ_north) − sin(φ_south))
+
+    Args:
+        ds: xarray Dataset or DataArray containing latitude and longitude coordinates.
+        lat_name: Name of the latitude coordinate.
+        lon_name: Name of the longitude coordinate.
+        earth_radius: Mean Earth radius in meters.
+
+    Returns:
+        xr.DataArray containing cell areas in square meters (m²).
+
+    Raises:
+        ValueError: If latitude or longitude coordinates are missing.
     """
+    if lat_name not in ds.coords or lon_name not in ds.coords:
+        raise ValueError(f"Dataset missing '{lat_name}' or '{lon_name}' coordinates.")
+
     lat = ds[lat_name].values
     lon = ds[lon_name].values
 
     dlon = np.abs(np.diff(lon).mean())
     dlon_rad = np.deg2rad(dlon)
 
-    # Use exact local midpoints between adjacent latitudes as cell boundaries
     lat_rad = np.deg2rad(lat)
     midpoints = (lat_rad[:-1] + lat_rad[1:]) / 2.0
     lat_s = np.empty_like(lat_rad)
@@ -132,91 +196,104 @@ def get_grid_cell_area(
         dims=[lat_name, lon_name],
         coords={lat_name: lat, lon_name: lon},
         name="grid_cell_area",
-        attrs={"units": "m²"},
+        attrs={"units": "m²", "long_name": "Grid cell area"},
     )
+
 
 def derive_surface_pressure(
     ds: xr.Dataset,
     ds_static: xr.Dataset,
-    msl_names: tuple[str, ...] = MSL_NAMES,
-    z_names: tuple[str, ...] = ZSFC_NAMES,
+    msl_names: Tuple[str, ...] = MSL_NAMES,
+    z_names: Tuple[str, ...] = ZSFC_NAMES,
     gravity: float = GRAVITY,
     r_dry: float = R_DRY,
     lapse_rate: float = LAPSE_RATE,
     lat_name: str = "latitude",
 ) -> xr.DataArray:
-    """
-    Derive surface pressure using the U.S. Standard Atmosphere (1976) profile.
-    
-    This avoids biases over high-elevation terrain caused by local surface 
-    temperature inversions.
-    
+    """Derive surface pressure using the U.S. Standard Atmosphere (1976) profile.
+
+    Formula:
         z_sfc = Φ_s / g
         P_s = P_MSL × (1 - (Γ × z_sfc) / T_0)^(g / (R_d × Γ))
-        
-    Where T_0 = 288.15 K (standard sea level temperature).
+        where T_0 = 288.15 K.
+
+    Ensemble Support:
+        If `ds` contains an ensemble dimension (e.g. 'ens'), the derived surface
+        pressure array retains that dimension.
+
+    Args:
+        ds: xarray Dataset containing mean sea level pressure (MSL).
+        ds_static: xarray Dataset containing surface geopotential (orography).
+        msl_names: Candidates for MSL variable name.
+        z_names: Candidates for surface geopotential variable name.
+        gravity: Gravitational acceleration in m/s².
+        r_dry: Gas constant for dry air in J/(kg·K).
+        lapse_rate: Standard tropospheric lapse rate in K/m.
+        lat_name: Name of latitude coordinate.
+
+    Returns:
+        xr.DataArray: Derived surface pressure in Pascals (Pa).
+
+    Raises:
+        ValueError: If MSL or surface geopotential variables are missing or grid mismatch > 1.
     """
-    # Locate variables
     msl_name = _find_var(ds, msl_names)
     if msl_name is None:
-        raise ValueError(f"No MSL variable found.  Tried {msl_names}. "
-                         f"Available: {list(ds.data_vars)}")
+        raise ValueError(
+            f"No MSL variable found. Tried {msl_names}. Available: {list(ds.data_vars)}"
+        )
     msl = ds[msl_name]
 
     z_name = _find_var(ds_static, z_names)
     if z_name is None:
-        raise ValueError(f"No z_sfc variable found.  Tried {z_names}. "
-                         f"Available: {list(ds_static.data_vars)}")
+        raise ValueError(
+            f"No surface geopotential found. Tried {z_names}. Available: {list(ds_static.data_vars)}"
+        )
     z_sfc = ds_static[z_name]
 
-    # Strip singleton time from static field
+    # Strip singleton time dimensions from static field
     for tdim in ("time", "valid_time"):
         if tdim in z_sfc.dims:
             z_sfc = z_sfc.isel({tdim: 0}, drop=True)
 
-    # Align grids (721 vs 720 latitudes)
+    # Grid alignment check
     if lat_name in z_sfc.dims and lat_name in msl.dims:
         n_static = z_sfc.sizes[lat_name]
         n_target = msl.sizes[lat_name]
 
         if abs(n_static - n_target) > 1:
-            raise ValueError("Latitude size mismatch is greater than 1. Grids are incompatible.")
-        # Safely drop the extra pole if there is exactly a 1-row difference
+            raise ValueError("Latitude size mismatch between static and MSL grid is > 1.")
         if n_static == n_target + 1:
             z_sfc = z_sfc.sel({lat_name: msl[lat_name].values}, method="nearest")
         elif n_target == n_static + 1:
             msl = msl.sel({lat_name: z_sfc[lat_name].values}, method="nearest")
 
-        # Automatically align coordinate values to avoid float precision issues
         if z_sfc.sizes[lat_name] == msl.sizes[lat_name]:
             z_sfc = z_sfc.assign_coords({lat_name: msl[lat_name]})
-            
+
     lon_name_cands = [d for d in msl.dims if "lon" in d.lower()]
     lon_name = lon_name_cands[0] if lon_name_cands else "longitude"
 
     if lon_name in z_sfc.dims and lon_name in msl.dims:
         if z_sfc.sizes[lon_name] != msl.sizes[lon_name]:
-            raise ValueError("Longitude size mismatch between z_sfc and model MSL.")
+            raise ValueError("Longitude size mismatch between surface geopotential and MSL.")
         z_sfc = z_sfc.assign_coords({lon_name: msl[lon_name]})
 
-    # --- U.S. Standard Atmosphere calculation ---
-    # Constants
-    t_0 = 288.15 # Standard sea level temperature
+    t_0 = 288.15
     exponent = gravity / (r_dry * lapse_rate)
-    
-    # Geometric height
-    z = z_sfc / gravity 
-    
+    z = z_sfc / gravity
+
     sp = msl * np.power((1.0 - (lapse_rate * z) / t_0), exponent)
-    
     sp.name = "surface_pressure"
-    sp.attrs = {"units": "Pa",
-                "long_name": "Surface pressure (US Standard Atmosphere derivation)"}
+    sp.attrs = {
+        "units": "Pa",
+        "long_name": "Surface pressure (US Standard Atmosphere derivation)",
+    }
     return sp
 
 
 # ============================================================================
-# Shared Column Integration
+# Column Integration Helpers
 # ============================================================================
 
 def _integrate_column(
@@ -225,26 +302,18 @@ def _integrate_column(
     ps_2d: np.ndarray,
     gravity: float = GRAVITY,
 ) -> np.ndarray:
-    """
-    Trapezoidal column integration with surface-pressure masking.
+    """Trapezoidal column integration with surface-pressure masking.
 
-    Integrates ``(1/g) ∫₀^{Ps} field dp`` for each grid point.
+    Integrates (1/g) ∫₀^{Ps} field dp for a single 2D spatial slice.
 
-    Parameters
-    ----------
-    field_3d : ndarray, shape (nlevels, nlat, nlon)
-        The quantity to integrate (e.g. q for TCWV, energy density for TE).
-    levels_hpa : ndarray, shape (nlevels,)
-        Pressure levels in hPa.
-    ps_2d : ndarray, shape (nlat, nlon)
-        Surface pressure in Pa.
-    gravity : float
-        Gravitational acceleration.
+    Args:
+        field_3d: Array of shape (nlevels, nlat, nlon).
+        levels_hpa: Pressure levels in hPa of shape (nlevels,).
+        ps_2d: Surface pressure array in Pa of shape (nlat, nlon).
+        gravity: Gravitational acceleration in m/s².
 
-    Returns
-    -------
-    ndarray, shape (nlat, nlon)
-        The column integral in units of [field] × Pa / (m/s²).
+    Returns:
+        Integrated 2D array of shape (nlat, nlon).
     """
     levels_pa = levels_hpa.astype(np.float64) * 100.0
     sort_idx = np.argsort(levels_pa)
@@ -252,32 +321,25 @@ def _integrate_column(
     field_sorted = field_3d[sort_idx]
 
     n = len(levels_sorted)
-    col = np.zeros_like(ps_2d)
+    col = np.zeros_like(ps_2d, dtype=np.float64)
 
-    # 1. Top of Atmosphere to first pressure level
-    # Assume the field value at the top level is constant up to 0 Pa.
+    # Top of atmosphere to first pressure level
     dp_top = np.minimum(ps_2d, levels_sorted[0]) - 0.0
     col += field_sorted[0] * dp_top
 
-    # 2. Interior layers
+    # Interior pressure layers
     for k in range(n - 1):
         p_top = levels_sorted[k]
         p_bot = levels_sorted[k + 1]
 
-        # Masking: Only integrate layers that actually exist above the surface
         eff_top = np.minimum(ps_2d, p_top)
         eff_bot = np.minimum(ps_2d, p_bot)
-        
-        # If the whole layer is below ground, dp becomes 0
         dp = np.maximum(0.0, eff_bot - eff_top)
 
-        # Trapezoidal average of the field
         field_avg = 0.5 * (field_sorted[k] + field_sorted[k + 1])
         col += field_avg * dp
 
-    # 3. Lowest pressure level to the actual surface
-    # If surface pressure is higher than the lowest available pressure level,
-    # assume the lowest level field value extends down to the surface.
+    # Lowest pressure level to surface
     dp_bottom = np.maximum(0.0, ps_2d - levels_sorted[-1])
     col += field_sorted[-1] * dp_bottom
 
@@ -286,22 +348,28 @@ def _integrate_column(
 
 
 def _ensure_ps_2d(ps: xr.DataArray) -> np.ndarray:
-    """Squeeze surface-pressure DataArray to a plain 2-D numpy array."""
-    arr = ps.values
-    # Squeeze all singleton dimensions first
-    arr = arr.squeeze()
+    """Extract a 2D numpy array (lat, lon) from a surface pressure DataArray.
+
+    Args:
+        ps: Input surface pressure DataArray.
+
+    Returns:
+        2D numpy array of surface pressure.
+
+    Raises:
+        ValueError: If array dimensions cannot be reduced to 2D.
+    """
+    arr = np.asarray(ps.values).squeeze()
     if arr.ndim == 0:
         return np.array([[float(arr)]])
     if arr.ndim == 2:
         return arr
     if arr.ndim == 3:
-        # Likely an un-selected level/ensemble dimension; take index 0
         warnings.warn(
-            f"ps has 3-D shape {arr.shape} after squeeze; "
-            f"taking slice [0] to reduce to 2-D."
+            f"ps array has 3D shape {arr.shape} after squeeze; taking slice [0]."
         )
         return arr[0]
-    raise ValueError(f"Cannot interpret ps with shape {arr.shape} as 2-D.")
+    raise ValueError(f"Cannot reduce ps shape {arr.shape} to 2D.")
 
 
 def _compute_tcwv(
@@ -311,12 +379,29 @@ def _compute_tcwv(
     level_dim: str = "level",
     levels: Optional[np.ndarray] = None,
 ) -> xr.DataArray:
-    """Integrate specific humidity → TCWV (kg/m²)."""
+    """Integrate specific humidity to Total Column Water Vapour (TCWV).
+
+    Args:
+        ds: Dataset containing specific humidity.
+        ps: Surface pressure DataArray.
+        q_name: Name of specific humidity variable.
+        level_dim: Name of level dimension.
+        levels: Optional array of pressure levels in hPa.
+
+    Returns:
+        xr.DataArray containing TCWV (kg/m²).
+    """
+    if q_name not in ds.data_vars:
+        q_found = _find_var(ds, Q_NAMES)
+        if q_found is None:
+            raise KeyError(f"Specific humidity variable '{q_name}' not in dataset.")
+        q_name = q_found
+
     q = ds[q_name]
     if levels is None:
         levels = ds[level_dim].values
-    ps_np = _ensure_ps_2d(ps)
 
+    ps_np = _ensure_ps_2d(ps)
     lat_dim = [d for d in q.dims if d != level_dim][0]
     lon_dim = [d for d in q.dims if d != level_dim][1]
 
@@ -330,6 +415,7 @@ def _compute_tcwv(
         attrs={"units": "kg/m²", "long_name": "Total Column Water Vapour"},
     )
 
+
 # ============================================================================
 # Metric 1 — Global Dry Air Mass
 # ============================================================================
@@ -342,16 +428,49 @@ def compute_dry_air_mass(
     level_dim: str = "level",
     levels: Optional[np.ndarray] = None,
     tcwv: Optional[xr.DataArray] = None,
-) -> float:
-    """
-    M_d = Σ A_i × (P_s,i / g − TCWV_i)     (returns Exagrams)
-    """
-    if tcwv is None:
-        tcwv = _compute_tcwv(ds, ps, q_name=q_name,
-                             level_dim=level_dim, levels=levels)
-    col_dry = ps / GRAVITY - tcwv
+) -> Union[float, Dict[Any, float]]:
+    """Compute global dry air mass in Exagrams (10¹⁸ kg).
 
-    # Ensure shapes match to prevent broadcast errors
+    Formula:
+        M_d = Σ A_i × (P_s,i / g − TCWV_i)
+
+    Ensemble Support:
+        If `ds` or `ps` contains an ensemble dimension (e.g. 'ens', 'member',
+        'realization'), the function computes the dry air mass for each member and
+        returns a dictionary mapping member IDs to their respective values.
+
+    Args:
+        ds: Dataset containing specific humidity field.
+        ps: Surface pressure DataArray.
+        area: Grid cell area DataArray (m²).
+        q_name: Variable name for specific humidity.
+        level_dim: Dimension name for pressure levels.
+        levels: Optional array of pressure levels in hPa.
+        tcwv: Optional pre-computed TCWV DataArray.
+
+    Returns:
+        Float (if deterministic) or Dict[member, float] (if ensemble) representing
+        global dry air mass in Eg.
+
+    Raises:
+        ValueError: If area and data grid shapes mismatch.
+    """
+    ens_dim = _detect_ensemble_dim(ds) or _detect_ensemble_dim(ps)
+    if ens_dim is not None and ens_dim in ds.dims:
+        results = {}
+        for m in ds[ens_dim].values:
+            ds_m = ds.sel({ens_dim: m})
+            ps_m = ps.sel({ens_dim: m}) if ens_dim in ps.dims else ps
+            tcwv_m = tcwv.sel({ens_dim: m}) if (tcwv is not None and ens_dim in tcwv.dims) else None
+            results[m] = float(compute_dry_air_mass(
+                ds_m, ps_m, area, q_name=q_name, level_dim=level_dim, levels=levels, tcwv=tcwv_m
+            ))
+        return results
+
+    if tcwv is None:
+        tcwv = _compute_tcwv(ds, ps, q_name=q_name, level_dim=level_dim, levels=levels)
+
+    col_dry = ps / GRAVITY - tcwv
     if area.shape != col_dry.shape:
         raise ValueError(f"Area shape {area.shape} and data shape {col_dry.shape} do not match.")
 
@@ -371,15 +490,48 @@ def compute_water_mass(
     level_dim: str = "level",
     levels: Optional[np.ndarray] = None,
     tcwv: Optional[xr.DataArray] = None,
-) -> float:
+) -> Union[float, Dict[Any, float]]:
+    """Compute global total atmospheric water mass in kg.
+
+    Formula:
+        M_w = Σ A_i × TCWV_i
+
+    Ensemble Support:
+        If `ds` or `ps` contains an ensemble dimension, evaluates the water mass per
+        member and returns a dictionary mapping member IDs to values.
+
+    Args:
+        ds: Dataset containing specific humidity.
+        ps: Surface pressure DataArray.
+        area: Grid cell area DataArray (m²).
+        q_name: Variable name for specific humidity.
+        level_dim: Dimension name for pressure levels.
+        levels: Optional array of pressure levels in hPa.
+        tcwv: Optional pre-computed TCWV DataArray.
+
+    Returns:
+        Float (if deterministic) or Dict[member, float] (if ensemble) representing
+        global water mass in kg.
+
+    Raises:
+        ValueError: If area and TCWV shapes mismatch.
     """
-    M_w = Σ A_i × TCWV_i      (returns kg)
-    """
+    ens_dim = _detect_ensemble_dim(ds) or _detect_ensemble_dim(ps)
+    if ens_dim is not None and ens_dim in ds.dims:
+        results = {}
+        for m in ds[ens_dim].values:
+            ds_m = ds.sel({ens_dim: m})
+            ps_m = ps.sel({ens_dim: m}) if ens_dim in ps.dims else ps
+            tcwv_m = tcwv.sel({ens_dim: m}) if (tcwv is not None and ens_dim in tcwv.dims) else None
+            results[m] = float(compute_water_mass(
+                ds_m, ps_m, area, q_name=q_name, level_dim=level_dim, levels=levels, tcwv=tcwv_m
+            ))
+        return results
+
     if tcwv is None:
-        tcwv = _compute_tcwv(ds, ps, q_name=q_name,
-                             level_dim=level_dim, levels=levels)
+        tcwv = _compute_tcwv(ds, ps, q_name=q_name, level_dim=level_dim, levels=levels)
     if area.shape != tcwv.shape:
-        raise ValueError("Area and TCWV shapes do not match!")
+        raise ValueError(f"Area shape {area.shape} and TCWV shape {tcwv.shape} do not match!")
     return float((area * tcwv).sum())
 
 
@@ -394,73 +546,99 @@ def compute_total_energy(
     z_sfc: xr.DataArray,
     t_name: str = "temperature",
     q_name: str = "q",
-    u_names: tuple[str, ...] = U_NAMES,
-    v_names: tuple[str, ...] = V_NAMES,
+    u_names: Tuple[str, ...] = U_NAMES,
+    v_names: Tuple[str, ...] = V_NAMES,
     level_dim: str = "level",
     levels: Optional[np.ndarray] = None,
     c_pd: float = C_PD,
     c_pv: float = C_PV,
     l_v: float = L_V,
-) -> float:
+) -> Union[float, Dict[Any, float]]:
+    """Compute global total atmospheric energy in Joules (J).
+
+    Formula:
+        TE = (1/g) Σ A_i ∫ (c_p T + Φ_s + L_v q + ½(u² + v²)) dp
+        where c_p = c_pd (1 − q) + c_pv q.
+
+    Ensemble Support:
+        If `ds` or `ps` contains an ensemble dimension, evaluates total energy for
+        each ensemble member and returns a dictionary of results.
+
+    Args:
+        ds: Dataset containing temperature, humidity, and wind components.
+        ps: Surface pressure DataArray.
+        area: Grid cell area DataArray (m²).
+        z_sfc: Surface geopotential DataArray.
+        t_name: Temperature variable name.
+        q_name: Specific humidity variable name.
+        u_names: Candidate variable names for zonal wind.
+        v_names: Candidate variable names for meridional wind.
+        level_dim: Pressure level dimension name.
+        levels: Optional array of pressure levels in hPa.
+        c_pd: Specific heat capacity of dry air in J/(kg·K).
+        c_pv: Specific heat capacity of water vapor in J/(kg·K).
+        l_v: Latent heat of vaporization in J/kg.
+
+    Returns:
+        Float (if deterministic) or Dict[member, float] (if ensemble) of total energy in J.
+
+    Raises:
+        ValueError: If required variables (u, v, T, q) are missing or grids mismatch.
     """
-    TE = (1/g) Σ A_i ∫ (c_p T + Φ_s + L_v q + ½(u² + v²)) dp   (returns J)
+    ens_dim = _detect_ensemble_dim(ds) or _detect_ensemble_dim(ps)
+    if ens_dim is not None and ens_dim in ds.dims:
+        results = {}
+        for m in ds[ens_dim].values:
+            ds_m = ds.sel({ens_dim: m})
+            ps_m = ps.sel({ens_dim: m}) if ens_dim in ps.dims else ps
+            results[m] = float(compute_total_energy(
+                ds_m, ps_m, area, z_sfc=z_sfc, t_name=t_name, q_name=q_name,
+                u_names=u_names, v_names=v_names, level_dim=level_dim, levels=levels,
+                c_pd=c_pd, c_pv=c_pv, l_v=l_v,
+            ))
+        return results
 
-    Uses moist-air specific heat:  c_p = c_pd (1 − q) + c_pv q
-
-    Uses static surface geopotential Φ_s (2-D) instead of the time-varying
-    3-D geopotential on pressure levels, following the conservation formula:
-
-        (1/g) ∫₀^{Ps} (c_p T + L_v q + Φ_s + k) dp
-
-    Kinetic energy is always computed explicitly from the u and v wind
-    components as 0.5 (u² + v²) to ensure consistency with momentum.
-    A ``ValueError`` is raised if u or v are not found in the dataset.
-    """
     if levels is None:
         levels = ds[level_dim].values
 
-    # Ensure level-first ordering for all 3D numpy arrays
-    T = ds[t_name].transpose(level_dim, ...).values
-    q = ds[q_name].transpose(level_dim, ...).values
+    t_var = t_name if t_name in ds.data_vars else _find_var(ds, T_NAMES)
+    q_var = q_name if q_name in ds.data_vars else _find_var(ds, Q_NAMES)
+    if t_var is None or q_var is None:
+        raise ValueError(f"Temperature or humidity missing from dataset. Tried {T_NAMES}/{Q_NAMES}.")
 
-    # Moist-air specific heat: c_p = c_pd (1 - q) + c_pv q
+    T = ds[t_var].transpose(level_dim, ...).values
+    q = ds[q_var].transpose(level_dim, ...).values
+
     c_p = c_pd * (1.0 - q) + c_pv * q
 
-    # Align z_sfc grid to dataset (handles 721↔720 latitude mismatch)
-    ref_var = ds[t_name]
+    ref_var = ds[t_var]
     lat_dim_ = [d for d in ref_var.dims if d != level_dim][0]
     lon_dim_ = [d for d in ref_var.dims if d != level_dim][1]
-    # Safer implementation:
+
     lat_diff = abs(z_sfc.sizes[lat_dim_] - ref_var.sizes[lat_dim_])
     lon_diff = abs(z_sfc.sizes[lon_dim_] - ref_var.sizes[lon_dim_])
 
     if lat_diff <= 1 and lon_diff == 0:
-        # Acceptable 721 vs 720 mismatch; safe to align
         z_aligned = z_sfc.reindex_like(ref_var.isel({level_dim: 0}), method="nearest")
     else:
-        # Unacceptable grid mismatch!
         raise ValueError(
-            f"Grid mismatch too large! z_sfc={z_sfc.shape}, model={ref_var.shape}. "
-            "Benchmark requires native grid alignment."
+            f"Grid mismatch too large: z_sfc={z_sfc.shape}, model={ref_var.shape}."
         )
 
-    # Following Sha et al. (2025), surface geopotential is used
-    # uniformly throughout the column rather than integrating
-    # the full vertical geopotential profile Φ(p).
-    # Broadcast 2-D surface geopotential to 3-D (level, lat, lon)
     nlevels = T.shape[0]
     z_sfc_np = z_aligned.values
     z_sfc_3d = np.broadcast_to(z_sfc_np[None, :, :], (nlevels,) + z_sfc_np.shape)
 
-    # Kinetic energy: always from u and v components
     u_var = _find_var(ds, u_names)
     v_var = _find_var(ds, v_names)
     if u_var is None or v_var is None:
         raise ValueError(
-            f"u/v wind components required for KE calculation. "
-            f"Tried {u_names}/{v_names}. Available: {list(ds.data_vars)}"
+            f"u/v wind components required for KE calculation. Tried {u_names}/{v_names}."
         )
-    wspd_sq = ds[u_var].transpose(level_dim, ...).values ** 2 + ds[v_var].transpose(level_dim, ...).values ** 2
+
+    u_val = ds[u_var].transpose(level_dim, ...).values
+    v_val = ds[v_var].transpose(level_dim, ...).values
+    wspd_sq = u_val**2 + v_val**2
 
     energy_density = c_p * T + z_sfc_3d + l_v * q + 0.5 * wspd_sq
     ps_np = _ensure_ps_2d(ps)
@@ -471,50 +649,38 @@ def compute_total_energy(
         coords={lat_dim_: ds[lat_dim_], lon_dim_: ds[lon_dim_]},
     )
     if area.shape != col_da.shape:
-        raise ValueError("Area and ENERGY shapes do not match!")
+        raise ValueError(f"Area shape {area.shape} and ENERGY shape {col_da.shape} do not match!")
     return float((area * col_da).sum())
 
 
 # ============================================================================
-# Metric 4 — Effective Resolution
+# Metric 4 — Spectral Analysis & Effective Resolution
 # ============================================================================
 
 def _ke_spectrum_spharm(
     u: np.ndarray,
     v: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Compute spherical-harmonic kinetic energy spectrum E(l) using pyshtools.
+
+    Args:
+        u: Zonal wind array (2D: lat, lon).
+        v: Meridional wind array (2D: lat, lon).
+
+    Returns:
+        Tuple of (wavenumber_array, energy_array).
+
+    Raises:
+        ValueError: If input arrays are not 2D or grid dimensions are invalid.
     """
-    KE spectrum E(l) via pyshtools SHExpandDH.
-
-    Parameters
-    ----------
-    u, v : ndarray, shape (nlat, nlon)
-        Wind components (N→S latitude order).
-
-    Returns
-    -------
-    wavenumber, energy : ndarray
-    """
-    try:
-        import pyshtools as pysh
-    except ImportError:
-        raise ImportError("pyshtools is required for metric 4. "
-                          "Install with: pip install pyshtools")
-
     u = np.asarray(u, dtype=np.float64).squeeze()
     v = np.asarray(v, dtype=np.float64).squeeze()
 
-    if u.ndim == 3:
-        raise ValueError(
-            "Expected 2D wind field for spectral analysis. "
-            "You must explicitly select the 500 hPa level before passing data to this metric."
-        )
-    if u.ndim != 2:
-        raise ValueError(f"Expected 2-D wind fields, got u.shape = {u.shape}")
+    if u.ndim != 2 or v.ndim != 2:
+        raise ValueError(f"Expected 2D wind fields, got u shape = {u.shape}, v shape = {v.shape}.")
 
     nlat, nlon = u.shape
 
-    # pyshtools needs even-sized grids
     if nlat % 2 != 0:
         u, v = u[:-1, :], v[:-1, :]
         nlat -= 1
@@ -522,10 +688,6 @@ def _ke_spectrum_spharm(
         u, v = u[:, :-1], v[:, :-1]
         nlon -= 1
 
-    # SHExpandDH requires nlon == 2*nlat (sampling=2) or nlon == nlat (sampling=1).
-    # For non-standard grids (e.g. NeuralGCM 256lat x 512lon already handled by
-    # transpose; but catch any remaining mismatch), regrid to the largest valid
-    # DH grid that doesn't exceed the input resolution.
     if nlon == 2 * nlat:
         sampling = 2
         lmax = nlat // 2 - 1
@@ -534,8 +696,7 @@ def _ke_spectrum_spharm(
         lmax = nlat // 2 - 1
     else:
         raise ValueError(
-            f"Grid ({nlat}, {nlon}) is not a valid Driscoll-Healy grid. "
-            f"Spectral analysis requires nlon == nlat or nlon == 2*nlat."
+            f"Grid ({nlat}, {nlon}) is not a valid Driscoll-Healy grid (requires nlon == 2*nlat or nlon == nlat)."
         )
 
     u_c = pysh.expand.SHExpandDH(u, sampling=sampling, lmax_calc=lmax)
@@ -555,36 +716,22 @@ def _ke_spectrum_spharm(
 
 def _scalar_spectrum_spharm(
     field: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Compute spherical-harmonic power spectrum S(l) of a 2D scalar field.
+
+    Args:
+        field: 2D scalar numpy array (lat, lon).
+
+    Returns:
+        Tuple of (wavenumber_array, power_array).
+
+    Raises:
+        ValueError: If input array is not 2D or grid dimensions are invalid.
     """
-    Power spectrum S(l) of a scalar field via pyshtools SHExpandDH.
-
-    S(l) = |c_{l,0}|^2 + sum_{m=1}^{l} (|c^cos_{l,m}|^2 + |c^sin_{l,m}|^2)
-
-    Parameters
-    ----------
-    field : ndarray, shape (nlat, nlon)
-        Scalar field (N→S latitude order).
-
-    Returns
-    -------
-    wavenumber, power : ndarray
-    """
-    try:
-        import pyshtools as pysh
-    except ImportError:
-        raise ImportError("pyshtools is required for spectral analysis. "
-                          "Install with: pip install pyshtools")
-
     field = np.asarray(field, dtype=np.float64).squeeze()
 
-    if field.ndim == 3:
-        raise ValueError(
-            "Expected 2D wind field for spectral analysis. "
-            "You must explicitly select the 500 hPa level before passing data to this metric."
-        )
     if field.ndim != 2:
-        raise ValueError(f"Expected 2-D field, got shape = {field.shape}")
+        raise ValueError(f"Expected 2D field, got shape = {field.shape}")
 
     nlat, nlon = field.shape
 
@@ -603,8 +750,7 @@ def _scalar_spectrum_spharm(
         lmax = nlat // 2 - 1
     else:
         raise ValueError(
-            f"Grid ({nlat}, {nlon}) is not a valid Driscoll-Healy grid. "
-            f"Spectral analysis requires nlon == nlat or nlon == 2*nlat."
+            f"Grid ({nlat}, {nlon}) is not a valid Driscoll-Healy grid (requires nlon == 2*nlat or nlon == nlat)."
         )
 
     coeffs = pysh.expand.SHExpandDH(field, sampling=sampling, lmax_calc=lmax)
@@ -621,48 +767,117 @@ def _scalar_spectrum_spharm(
     return wavenumber, power
 
 
+def compute_ke_spectrum(
+    ds: xr.Dataset,
+    level: float = 500.0,
+    u_names: Tuple[str, ...] = U_NAMES,
+    v_names: Tuple[str, ...] = V_NAMES,
+    level_dim: str = "level",
+) -> Union[Tuple[np.ndarray, np.ndarray], Dict[Any, Tuple[np.ndarray, np.ndarray]]]:
+    """Compute the kinetic energy spectrum E(l) at a pressure level.
+
+    Ensemble Support:
+        If an ensemble dimension is present, evaluates the KE spectrum for each
+        ensemble member and returns a dictionary mapping member IDs to (k, E) tuples.
+
+    Args:
+        ds: Dataset containing zonal and meridional wind fields.
+        level: Pressure level in hPa (default 500).
+        u_names: Candidate variable names for zonal wind.
+        v_names: Candidate variable names for meridional wind.
+        level_dim: Name of level dimension.
+
+    Returns:
+        Tuple of (wavenumber, energy) arrays, or dict of tuples if ensemble.
+
+    Raises:
+        ValueError: If wind components are missing.
+    """
+    ens_dim = _detect_ensemble_dim(ds)
+    if ens_dim is not None and ens_dim in ds.dims:
+        results = {}
+        for m in ds[ens_dim].values:
+            results[m] = compute_ke_spectrum(
+                ds.sel({ens_dim: m}), level=level, u_names=u_names, v_names=v_names, level_dim=level_dim
+            )
+        return results
+
+    if level_dim not in ds.dims:
+        level_dim = _detect_level_dim(ds)
+
+    u_var = _find_var(ds, u_names)
+    v_var = _find_var(ds, v_names)
+    if u_var is None or v_var is None:
+        raise ValueError(
+            f"u/v wind fields not found. Tried {u_names}/{v_names}. Available: {list(ds.data_vars)}"
+        )
+
+    u = ds[u_var]
+    v = ds[v_var]
+
+    if level_dim in u.dims:
+        lvls = ds[level_dim].values
+        idx = int(np.abs(lvls - level).argmin())
+        u = u.isel({level_dim: idx})
+        v = v.isel({level_dim: idx})
+
+    lat_dims = [d for d in u.dims if "lat" in d.lower()]
+    lon_dims = [d for d in u.dims if "lon" in d.lower()]
+    if lat_dims and lon_dims:
+        u = u.transpose(..., lat_dims[0], lon_dims[0])
+        v = v.transpose(..., lat_dims[0], lon_dims[0])
+
+    return _ke_spectrum_spharm(u.values, v.values)
+
+
 def compute_q_spectrum(
     ds: xr.Dataset,
     level: float = 500.0,
-    q_names: tuple[str, ...] = Q_NAMES,
+    q_names: Tuple[str, ...] = Q_NAMES,
     level_dim: str = "level",
-) -> tuple[np.ndarray, np.ndarray]:
+) -> Union[Tuple[np.ndarray, np.ndarray], Dict[Any, Tuple[np.ndarray, np.ndarray]]]:
+    """Compute the specific humidity power spectrum S_q(l) at a single pressure level.
+
+    Ensemble Support:
+        If an ensemble dimension is present, evaluates the Q spectrum for each
+        ensemble member and returns a dictionary of results.
+
+    Args:
+        ds: Dataset containing specific humidity.
+        level: Pressure level in hPa (default 500).
+        q_names: Candidate variable names for specific humidity.
+        level_dim: Name of level dimension.
+
+    Returns:
+        Tuple of (wavenumber, power) arrays, or dict of tuples if ensemble.
+
+    Raises:
+        ValueError: If humidity variable is missing.
     """
-    Compute the specific-humidity power spectrum S_q(l) at a single pressure level.
+    ens_dim = _detect_ensemble_dim(ds)
+    if ens_dim is not None and ens_dim in ds.dims:
+        results = {}
+        for m in ds[ens_dim].values:
+            results[m] = compute_q_spectrum(
+                ds.sel({ens_dim: m}), level=level, q_names=q_names, level_dim=level_dim
+            )
+        return results
 
-    S_q(k) = sum_{m=-k}^{k} |q_hat_{k,m}|^2
-
-    Parameters
-    ----------
-    ds : xr.Dataset
-        Dataset containing specific humidity.
-    level : float
-        Pressure level in hPa (default 500).
-    q_names : tuple[str, ...]
-        Candidate variable names for specific humidity.
-    level_dim : str
-        Name of the pressure-level dimension.
-
-    Returns
-    -------
-    (wavenumber, power) : (ndarray, ndarray)
-    """
     if level_dim not in ds.dims:
         level_dim = _detect_level_dim(ds)
 
     q_var = _find_var(ds, q_names)
     if q_var is None:
         raise ValueError(
-            f"Specific humidity not found. Tried {q_names}. "
-            f"Available: {list(ds.data_vars)}"
+            f"Specific humidity variable not found. Tried {q_names}. Available: {list(ds.data_vars)}"
         )
+
     q = ds[q_var]
     if level_dim in q.dims:
         lvls = ds[level_dim].values
         idx = int(np.abs(lvls - level).argmin())
         q = q.isel({level_dim: idx})
 
-    # Ensure (latitude, longitude) order
     lat_dims = [d for d in q.dims if "lat" in d.lower()]
     lon_dims = [d for d in q.dims if "lon" in d.lower()]
     if lat_dims and lon_dims:
@@ -679,163 +894,82 @@ def _find_effective_resolution(
     k_min: int = 10,
     n_consecutive: int = 5,
     earth_radius: float = EARTH_RADIUS,
-) -> tuple[float, float]:
-    """
-    L_eff (km) = 2π R / k_cutoff where E_pred/E_true consistently < threshold.
+) -> Tuple[float, float]:
+    """Calculate effective spatial resolution L_eff (km) where E_pred / E_true < threshold.
 
-    The cutoff wavenumber is the first k where the energy ratio drops below
-    *threshold* and stays below for at least *n_consecutive* consecutive
-    wavenumbers.  This avoids flagging isolated noisy dips as genuine
-    resolution loss.
+    Args:
+        k: Wavenumber array.
+        e_pred: Predicted spectrum array.
+        e_true: Target/Reference spectrum array.
+        threshold: Energy ratio threshold (default 0.5).
+        k_min: Minimum wavenumber to evaluate.
+        n_consecutive: Number of consecutive wavenumbers required below threshold.
+        earth_radius: Mean Earth radius in meters.
 
-    Returns (L_eff_km, small_scale_ratio).
+    Returns:
+        Tuple of (effective_resolution_km, small_scale_ratio).
+
+    Raises:
+        ValueError: If spectrum array is too short.
     """
     mask = (k >= k_min) & (e_true > 1e-12)
     k_sel = k[mask]
     ratio = e_pred[mask] / e_true[mask]
 
-    below = ratio < threshold  # boolean array
-
-    # Find the first index where *n_consecutive* consecutive values are below
-    # threshold.  Use a rolling sum: if sum of n_consecutive bools == n, we
-    # have a sustained drop.
+    below = ratio < threshold
     n = len(ratio)
     if n < n_consecutive:
         raise ValueError(
-            f"Spectrum too short ({n} wavenumbers). Need at least {n_consecutive} "
-            "to determine effective resolution."
+            f"Spectrum too short ({n} wavenumbers). Need at least {n_consecutive} for effective resolution."
         )
 
-    # Rolling count of consecutive below-threshold values
     idx = None
     run = 0
     for i in range(n):
         if below[i]:
             run += 1
             if run >= n_consecutive:
-                idx = i - n_consecutive + 1  # first index of the run
+                idx = i - n_consecutive + 1
                 break
         else:
             run = 0
 
     if idx is None:
-        # Never sustained n_consecutive below threshold → fully resolved
-        # down to the grid scale.  Cap at the Nyquist wavelength:
-        #   λ_grid = 2πR / l_max  where l_max = max wavenumber in spectrum
         l_max = float(k_sel[-1]) if len(k_sel) > 0 else float(k[-1])
         L_grid_km = (2.0 * np.pi * earth_radius / l_max) / 1000.0
         return L_grid_km, float(np.mean(ratio))
 
     k_c = float(k_sel[idx])
     L_km = (2.0 * np.pi * earth_radius / k_c) / 1000.0
+    small_scale_ratio = float(np.mean(ratio[idx:])) if idx < len(ratio) else float(ratio[-1])
 
-    return L_km
-
-
-def compute_ke_spectrum(
-    ds: xr.Dataset,
-    level: float = 500.0,
-    u_names: tuple[str, ...] = U_NAMES,
-    v_names: tuple[str, ...] = V_NAMES,
-    level_dim: str = "level",
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Compute the kinetic energy spectrum E(l) at a single pressure level.
-
-    Parameters
-    ----------
-    ds : xr.Dataset
-        Dataset containing u and v wind components.
-    level : float
-        Pressure level in hPa (default 500).
-    u_names, v_names : tuple[str, ...]
-        Candidate variable names for wind components.
-    level_dim : str
-        Name of the pressure-level dimension.
-
-    Returns
-    -------
-    (wavenumber, energy) : (ndarray, ndarray)
-        Spherical-harmonic wavenumber and KE at each wavenumber.
-    """
-    if level_dim not in ds.dims:
-        level_dim = _detect_level_dim(ds)
-
-    u_var = _find_var(ds, u_names)
-    v_var = _find_var(ds, v_names)
-    if u_var is None or v_var is None:
-        raise ValueError(
-            f"u/v not found. Tried {u_names}/{v_names}. "
-            f"Available: {list(ds.data_vars)}"
-        )
-    u = ds[u_var]
-    v = ds[v_var]
-    if level_dim in u.dims:
-        lvls = ds[level_dim].values
-        idx = int(np.abs(lvls - level).argmin())
-        u = u.isel({level_dim: idx})
-        v = v.isel({level_dim: idx})
-
-    # Ensure (latitude, longitude) order — some models (e.g. NeuralGCM on WB2)
-    # store dims as (longitude, latitude).
-    for da in (u, v):
-        lat_dims = [d for d in da.dims if "lat" in d.lower()]
-        lon_dims = [d for d in da.dims if "lon" in d.lower()]
-        if lat_dims and lon_dims:
-            u = u.transpose(..., lat_dims[0], lon_dims[0])
-            v = v.transpose(..., lat_dims[0], lon_dims[0])
-            break
-
-    return _ke_spectrum_spharm(u.values, v.values)
+    return L_km, small_scale_ratio
 
 
 def compute_spectral_scores(
     e_pred: np.ndarray,
     e_true: np.ndarray,
     eps: float = 1e-12,
-) -> tuple[float, float]:
+) -> Tuple[float, float]:
+    """Compute spectral divergence (1-Wasserstein) and spectral residual (log RMSE).
+
+    Args:
+        e_pred: Predicted spectrum energy array.
+        e_true: Target spectrum energy array.
+        eps: Epsilon constant for numerical stability in log calculation.
+
+    Returns:
+        Tuple of (spectral_divergence, spectral_residual).
     """
-    Spectral evaluation metrics from pre-computed KE spectra.
-
-    Parameters
-    ----------
-    e_pred, e_true : ndarray
-        1-D energy arrays (must have the same length).
-    eps : float
-        Small constant for numerical stability.
-
-    Returns
-    -------
-    (spec_div, spec_res)
-
-    spec_div : float
-        Spectral Divergence — Wasserstein distance between the normalised energy
-        distributions of the true and predicted spectra::
-
-            P(k) = E_true(k) / sum(E_true)
-            Q(k) = E_pred(k) / sum(E_pred)
-            SpecDiv = Wasserstein distance
-
-    spec_res : float
-        Spectral Residual — RMSE of the log-energy difference::
-
-            SpecRes = sqrt( (1/K) sum_k (log(E_pred+eps) - log(E_true+eps))^2 )
-    """
-    # Create the wavenumber array (0 to len-1)
     k = np.arange(len(e_pred))
-    
-    # ---- Spectral Divergence (1-Wasserstein Distance) ----
-    # Scipy normalizes the weights internally, so passing raw energy is safe.
-    spec_div = float(wasserstein_distance(
-        u_values=k, 
-        v_values=k, 
-        u_weights=e_true, 
-        v_weights=e_pred
-    ))
+    spec_div = float(
+        wasserstein_distance(
+            u_values=k, v_values=k, u_weights=e_true, v_weights=e_pred
+        )
+    )
 
-    # ---- Spectral Residual (log-RMSE) ----
     log_diff = np.log(e_pred + eps) - np.log(e_true + eps)
-    spec_res = float(np.sqrt(np.mean(log_diff ** 2)))
+    spec_res = float(np.sqrt(np.mean(log_diff**2)))
 
     return spec_div, spec_res
 
@@ -847,26 +981,54 @@ def compute_spectral_scores(
 def compute_hydrostatic_imbalance(
     ds: xr.Dataset,
     area: xr.DataArray,
-    phi_name: str | None = None,
-    t_name: str | None = None, 
+    phi_name: Optional[str] = None,
+    t_name: Optional[str] = None,
     q_name: str = "q",
     level_dim: str = "level",
     lat_name: str = "latitude",
     p_top: float = 500.0,
     p_bot: float = 850.0,
     r_dry: float = R_DRY,
-) -> float:
+) -> Union[float, Dict[Any, float]]:
+    """Compute hydrostatic balance error RMSE (m²/s²) between p_top and p_bot.
+
+    Formula:
+        Error = abs((Φ_top − Φ_bot) − R_d T̄_v ln(p_bot/p_top))
+
+    Ensemble Support:
+        If `ds` contains an ensemble dimension, evaluates the hydrostatic error per
+        member and returns a dictionary mapping member IDs to RMSE values.
+
+    Args:
+        ds: Dataset containing geopotential and temperature fields.
+        area: Grid cell area DataArray (m²).
+        phi_name: Geopotential variable name.
+        t_name: Temperature variable name.
+        q_name: Specific humidity variable name.
+        level_dim: Pressure level dimension name.
+        lat_name: Latitude dimension name.
+        p_top: Upper pressure level in hPa.
+        p_bot: Lower pressure level in hPa.
+        r_dry: Gas constant for dry air in J/(kg·K).
+
+    Returns:
+        Float (if deterministic) or Dict[member, float] (if ensemble) representing
+        area-weighted hydrostatic balance RMSE in m²/s².
+
+    Raises:
+        ValueError: If geopotential or temperature variables are missing or shapes mismatch.
     """
-    Hypsometric check between p_top and p_bot hPa.
+    ens_dim = _detect_ensemble_dim(ds)
+    if ens_dim is not None and ens_dim in ds.dims:
+        results = {}
+        for m in ds[ens_dim].values:
+            results[m] = float(compute_hydrostatic_imbalance(
+                ds.sel({ens_dim: m}), area, phi_name=phi_name, t_name=t_name,
+                q_name=q_name, level_dim=level_dim, lat_name=lat_name,
+                p_top=p_top, p_bot=p_bot, r_dry=r_dry,
+            ))
+        return results
 
-    Error = |(Φ_top − Φ_bot) − R_d T̄_v ln(p_bot/p_top)|
-
-    T̄_v is the mean virtual temperature of the layer, approximated as
-    the mean of T_v at the two levels where T_v ≈ T(1 + 0.(R_V/R_DRY - 1) q).
-
-    Returns area-weighted RMSE (m²/s²).
-    """
-    # Auto-detect level dimension if default is missing
     if level_dim not in ds.dims:
         level_dim = _detect_level_dim(ds)
     levels = ds[level_dim].values
@@ -874,51 +1036,45 @@ def compute_hydrostatic_imbalance(
     if phi_name is None:
         phi_name = _find_var(ds, PHI_NAMES)
         if phi_name is None:
-            raise ValueError(f"No geopotential variable found. Tried {PHI_NAMES}. Available: {list(ds.data_vars)}")
+            raise ValueError(f"Geopotential variable not found. Tried {PHI_NAMES}.")
     if t_name is None:
         t_name = _find_var(ds, T_NAMES)
         if t_name is None:
-            raise ValueError(f"No temperature variable found. Tried {T_NAMES}. Available: {list(ds.data_vars)}")
+            raise ValueError(f"Temperature variable not found. Tried {T_NAMES}.")
     if q_name not in ds.data_vars:
-        q_name = _find_var(ds, Q_NAMES) or q_name 
+        q_name = _find_var(ds, Q_NAMES) or q_name
 
-    def _sel_level(var, p):
+    def _sel_level(var: str, p: float) -> xr.DataArray:
         idx = int(np.abs(levels - p).argmin())
         return ds[var].isel({level_dim: idx})
 
     phi_top = _sel_level(phi_name, p_top)
     phi_bot = _sel_level(phi_name, p_bot)
-
     T_top = _sel_level(t_name, p_top)
     T_bot = _sel_level(t_name, p_bot)
 
-    # Virtual temperature
     if q_name in ds.data_vars:
         q_top = _sel_level(q_name, p_top)
         q_bot = _sel_level(q_name, p_bot)
-        Tv_top = T_top * (1.0 + (R_V/R_DRY - 1) * q_top)
-        Tv_bot = T_bot * (1.0 + (R_V/R_DRY - 1) * q_bot)
+        Tv_top = T_top * (1.0 + (R_V / R_DRY - 1) * q_top)
+        Tv_bot = T_bot * (1.0 + (R_V / R_DRY - 1) * q_bot)
     else:
         Tv_top = T_top
         Tv_bot = T_bot
 
-    # Two-level approximation of ∫ T_v d ln p
     Tv_mean = 0.5 * (Tv_top + Tv_bot)
-
-    # Hypsometric equation:  Φ_top − Φ_bot = R_d T̄_v ln(p_bot/p_top)
     lhs = phi_top - phi_bot
     rhs = r_dry * Tv_mean * np.log(p_bot / p_top)
     error = lhs - rhs
 
-    # Ensure error has the same (lat, lon) dim order as area
     lat_dim_e = next((d for d in error.dims if "lat" in d.lower()), None)
     lon_dim_e = next((d for d in error.dims if "lon" in d.lower()), None)
     if lat_dim_e and lon_dim_e and error.dims != (lat_dim_e, lon_dim_e):
         error = error.transpose(lat_dim_e, lon_dim_e)
 
-    # Area-weighted RMSE
     if area.shape != error.shape:
-        raise ValueError(f"Area shape {area.shape} and error shape {error.shape} do not match in Hydrostatic check.")
+        raise ValueError(f"Area shape {area.shape} and error shape {error.shape} do not match.")
+
     weights = area / float(area.sum())
     mse = float((weights.values * error.values**2).sum())
     return float(np.sqrt(mse))
@@ -932,8 +1088,8 @@ def compute_geostrophic_imbalance(
     ds: xr.Dataset,
     area: xr.DataArray,
     phi_name: str = "geopotential",
-    u_names: tuple[str, ...] = U_NAMES,
-    v_names: tuple[str, ...] = V_NAMES,
+    u_names: Tuple[str, ...] = U_NAMES,
+    v_names: Tuple[str, ...] = V_NAMES,
     level: float = 500.0,
     level_dim: str = "level",
     lat_name: str = "latitude",
@@ -941,48 +1097,77 @@ def compute_geostrophic_imbalance(
     lat_cutoff: float = 10.0,
     earth_radius: float = EARTH_RADIUS,
     omega: float = OMEGA,
-) -> float:
+) -> Union[float, Dict[Any, float]]:
+    """Compute geostrophic wind balance RMSE (m/s) at a given pressure level.
+
+    Formula:
+        u_g = −(1 / fR) ∂Φ/∂φ
+        v_g = (1 / fR cosφ) ∂Φ/∂λ
+        RMSE = sqrt( AreaWeightedMean( (u - u_g)² + (v - v_g)² ) )
+        outside equatorial band (±lat_cutoff°).
+
+    Ensemble Support:
+        If `ds` contains an ensemble dimension, evaluates geostrophic balance per
+        member and returns a dictionary mapping member IDs to RMSE values.
+
+    Args:
+        ds: Dataset containing geopotential and wind fields.
+        area: Grid cell area DataArray (m²).
+        phi_name: Geopotential variable name.
+        u_names: Candidate variable names for zonal wind.
+        v_names: Candidate variable names for meridional wind.
+        level: Target pressure level in hPa.
+        level_dim: Pressure level dimension name.
+        lat_name: Latitude coordinate name.
+        lon_name: Longitude coordinate name.
+        lat_cutoff: Equatorial exclusion boundary in degrees.
+        earth_radius: Earth radius in meters.
+        omega: Angular velocity of Earth in rad/s.
+
+    Returns:
+        Float (if deterministic) or Dict[member, float] (if ensemble) of
+        geostrophic imbalance RMSE in m/s.
+
+    Raises:
+        ValueError: If geopotential or wind fields are missing.
     """
-    RMSE of |V_actual − V_geostrophic| at *level* hPa.
+    ens_dim = _detect_ensemble_dim(ds)
+    if ens_dim is not None and ens_dim in ds.dims:
+        results = {}
+        for m in ds[ens_dim].values:
+            results[m] = float(compute_geostrophic_imbalance(
+                ds.sel({ens_dim: m}), area, phi_name=phi_name, u_names=u_names,
+                v_names=v_names, level=level, level_dim=level_dim,
+                lat_name=lat_name, lon_name=lon_name, lat_cutoff=lat_cutoff,
+                earth_radius=earth_radius, omega=omega,
+            ))
+        return results
 
-    u_g = −(1 / fR)  ∂Φ/∂φ
-    v_g =  (1 / fR cosφ)  ∂Φ/∂λ
-
-    Latitudes within ±lat_cutoff° are excluded (equatorial singularity).
-    Latitudes beyond ±89.9° are excluded (polar singularity).
-
-    Returns area-weighted RMSE (m/s).
-    """
-    # Auto-detect level dimension if default is missing
     if level_dim not in ds.dims:
         level_dim = _detect_level_dim(ds)
 
     levels = ds[level_dim].values
     idx = int(np.abs(levels - level).argmin())
 
-    # Get Φ at the chosen level
-    phi_var = _find_var(ds, (phi_name,))
+    phi_var = phi_name if phi_name in ds.data_vars else _find_var(ds, PHI_NAMES)
     if phi_var is None:
-        phi_var = _find_var(ds, PHI_NAMES)
-    if phi_var is None:
-        raise ValueError(f"Geopotential not found. "
-                         f"Available: {list(ds.data_vars)}")
+        raise ValueError(f"Geopotential variable not found. Tried {PHI_NAMES}.")
+
     phi = ds[phi_var]
     if level_dim in phi.dims:
         phi = phi.isel({level_dim: idx})
 
-    # Get actual wind
     u_var = _find_var(ds, u_names)
     v_var = _find_var(ds, v_names)
     if u_var is None or v_var is None:
-        raise ValueError("u/v wind not found for geostrophic check.")
+        raise ValueError(f"u/v wind not found. Tried {u_names}/{v_names}.")
+
     u_actual = ds[u_var]
     v_actual = ds[v_var]
     if level_dim in u_actual.dims:
         u_actual = u_actual.isel({level_dim: idx})
         v_actual = v_actual.isel({level_dim: idx})
 
-    # Ensure 2-D by transposing to (lat, lon) order explicitly
     if lat_name in phi.dims and lon_name in phi.dims:
         phi = phi.transpose(lat_name, lon_name)
         u_actual = u_actual.transpose(lat_name, lon_name)
@@ -994,85 +1179,85 @@ def compute_geostrophic_imbalance(
     lat_rad = np.deg2rad(lat)
     lon_rad = np.deg2rad(lon)
 
-    # Coriolis parameter  f = 2Ω sin(φ)
     f_1d = 2.0 * omega * np.sin(lat_rad)
     f_2d = f_1d[:, None] * np.ones((1, len(lon)))
-
     cos_lat = np.cos(lat_rad)
     cos_2d = cos_lat[:, None] * np.ones((1, len(lon)))
 
-    # Geopotential gradient (central differences on sphere)
-    phi_np = phi.values  # (lat, lon)
-
-    # Enforce monotonic latitude ordering
-    assert np.all(np.diff(lat_rad) > 0) or np.all(np.diff(lat_rad) < 0), (
-        "Latitude must be monotonically ordered for finite differences."
-    )
-
-    # ∂Φ/∂φ  (latitude gradient)
-    dPhi_dphi = np.gradient(phi_np, lat_rad, axis=0, edge_order=2)  # m²/s² per radian
-
-    # ∂Φ/∂λ  (longitude gradient)
+    phi_np = phi.values
+    dPhi_dphi = np.gradient(phi_np, lat_rad, axis=0, edge_order=2)
     phi_padded = np.pad(phi_np, pad_width=((0, 0), (1, 1)), mode="wrap")
     dlon_rad = np.abs(lon_rad[1] - lon_rad[0])
     dPhi_dlam = np.gradient(phi_padded, dlon_rad, axis=1)[:, 1:-1]
 
-    # Geostrophic wind
-    #   u_g = −(1 / (f R)) ∂Φ/∂φ
-    #   v_g =  (1 / (f R cosφ)) ∂Φ/∂λ
     with np.errstate(divide="ignore", invalid="ignore"):
         u_g = -dPhi_dphi / (f_2d * earth_radius)
         v_g = dPhi_dlam / (f_2d * earth_radius * cos_2d)
 
-    # Vector difference
     du = u_actual.values - u_g
     dv = v_actual.values - v_g
     vec_err_sq = du**2 + dv**2
 
-    # Mask equatorial band AND poles (singularity at cos(lat)=0)
     lat_mask = (np.abs(lat) >= lat_cutoff) & (np.abs(lat) < 89.9)
     mask_2d = lat_mask[:, None] * np.ones((1, len(lon)), dtype=bool)
     vec_err_sq = np.where(mask_2d, np.nan_to_num(vec_err_sq, nan=0.0), 0.0)
 
-    # Area-weighted RMSE (excluding equator)
-    # Align area to match data grid
     area_vals = area.values
     if area_vals.shape != vec_err_sq.shape:
-        # Recompute area from the actual data grid
         area_da = get_grid_cell_area(ds)
         if lat_name in area_da.dims and lon_name in area_da.dims:
             area_da = area_da.transpose(lat_name, lon_name)
         area_vals = area_da.values
+
     w = area_vals.copy()
     w[~mask_2d] = 0.0
     w_sum = w.sum()
     if w_sum == 0:
         return float("nan")
-    w_norm = w / w_sum
-    if w_norm.shape != vec_err_sq.shape:
-        raise ValueError(f"Weights shape {w_norm.shape} and error shape {vec_err_sq.shape} do not match in Geostrophic check.")
 
+    w_norm = w / w_sum
     mse = float((w_norm * vec_err_sq).sum())
     return float(np.sqrt(mse))
 
+
 # ============================================================================
-# Metric 7 - Lapse rate calculation
+# Metric 7 — Environmental Lapse Rate Wasserstein Distance
 # ============================================================================
 
 def compute_lapse_rate_wasserstein(
     ds_pred: xr.Dataset,
     ds_ref: xr.Dataset,
     area: xr.DataArray,
-    t_name: str | None = None,
-    phi_name: str | None = None,
-    level_dim_pred: str | None = None,
-    level_dim_ref: str | None = None,
-) -> dict[str, float]:
+    t_name: Optional[str] = None,
+    phi_name: Optional[str] = None,
+    level_dim_pred: Optional[str] = None,
+    level_dim_ref: Optional[str] = None,
+) -> Dict[str, float]:
+    """Compute 1D Wasserstein distance of lapse rate distribution for geographic bands.
+
+    Calculates lapse rate Γ between 500 hPa and 850 hPa in K/km for Tropics,
+    Northern Hemisphere mid-latitudes, and Southern Hemisphere mid-latitudes.
+
+    Ensemble Support:
+        If `ds_pred` contains an ensemble dimension, computes the mean predicted
+        lapse rate across members before calculating Wasserstein distance against reference.
+
+    Args:
+        ds_pred: Predicted dataset containing temperature and geopotential.
+        ds_ref: Reference dataset containing temperature and geopotential.
+        area: Grid cell area DataArray.
+        t_name: Variable name for temperature.
+        phi_name: Variable name for geopotential.
+        level_dim_pred: Level dimension name for prediction dataset.
+        level_dim_ref: Level dimension name for reference dataset.
+
+    Returns:
+        Dict mapping region key to Wasserstein distance (W1) in K/km.
     """
-    Computes the 1D Wasserstein distance (W1) of the environmental lapse rate 
-    (between 500 hPa and 850 hPa) for three geographical bands. The calculation 
-    is area-weighted to account for poleward grid cell convergence.
-    """
+    ens_dim_p = _detect_ensemble_dim(ds_pred)
+    if ens_dim_p is not None and ens_dim_p in ds_pred.dims:
+        ds_pred = ds_pred.mean(dim=ens_dim_p)
+
     t_name_p = t_name or _find_var(ds_pred, T_NAMES)
     phi_name_p = phi_name or _find_var(ds_pred, PHI_NAMES)
     t_name_r = t_name or _find_var(ds_ref, T_NAMES)
@@ -1081,13 +1266,11 @@ def compute_lapse_rate_wasserstein(
     ld_p = level_dim_pred or _detect_level_dim(ds_pred)
     ld_r = level_dim_ref or _detect_level_dim(ds_ref)
 
-    def _calc_gamma(ds, t_var, phi_var, ld):
+    def _calc_gamma(ds: xr.Dataset, t_var: str, phi_var: str, ld: str) -> xr.DataArray:
         t_500 = ds[t_var].sel({ld: 500})
         t_850 = ds[t_var].sel({ld: 850})
         phi_500 = ds[phi_var].sel({ld: 500})
         phi_850 = ds[phi_var].sel({ld: 850})
-        
-        # Lapse rate formulation, units converted to K/km
         return -GRAVITY * (t_500 - t_850) / (phi_500 - phi_850) * 1000.0
 
     gamma_p = _calc_gamma(ds_pred, t_name_p, phi_name_p, ld_p)
@@ -1102,20 +1285,17 @@ def compute_lapse_rate_wasserstein(
         "sh_mid": ((lat_p >= -60) & (lat_p < -30), (lat_r >= -60) & (lat_r < -30)),
     }
 
-    # Re-calculate native areas to avoid cross-dataset float coordinate alignment issues
     area_p = get_grid_cell_area(ds_pred)
     area_r = get_grid_cell_area(ds_ref)
 
     results = {}
     for band_name, (mask_p, mask_r) in bands.items():
-        # Mask arrays by band and flatten to 1D
         gp_band = gamma_p.where(mask_p, drop=True).values.flatten()
         gr_band = gamma_r.where(mask_r, drop=True).values.flatten()
-        
+
         area_p_band = area_p.where(mask_p, drop=True).values.flatten()
         area_r_band = area_r.where(mask_r, drop=True).values.flatten()
 
-        # Isolate valid data points (exclude NaNs introduced by the mask padding)
         valid_p = ~np.isnan(gp_band) & ~np.isnan(area_p_band)
         valid_r = ~np.isnan(gr_band) & ~np.isnan(area_r_band)
 
@@ -1123,40 +1303,33 @@ def compute_lapse_rate_wasserstein(
             u_values=gp_band[valid_p],
             v_values=gr_band[valid_r],
             u_weights=area_p_band[valid_p],
-            v_weights=area_r_band[valid_r]
+            v_weights=area_r_band[valid_r],
         )
         results[f"lapse_rate_w1_{band_name}"] = float(w1)
 
     return results
 
+
 # ============================================================================
-# Drift (Linear Trend) Helpers
+# Drift & Conservation Helpers
 # ============================================================================
 
 def compute_drift_slope(
     hours: np.ndarray,
     values: np.ndarray,
 ) -> float:
-    """
-    Compute the linear-regression slope of *values* vs *hours*.
+    """Compute linear regression slope expressed as change per day.
 
-    Parameters
-    ----------
-    hours : ndarray, shape (N,)
-        Lead times in hours (e.g. [6, 12, 18, …]).
-    values : ndarray, shape (N,)
-        Globally integrated scalar at each lead time (e.g. dry mass in Eg).
+    Args:
+        hours: Array of lead times in hours.
+        values: Array of metric values at each lead time.
 
-    Returns
-    -------
-    float
-        Slope expressed as change **per day** (i.e. the hours are converted
-        to fractional days before regression).
+    Returns:
+        Linear slope expressed as change per fractional day. Returns NaN if <2 points.
     """
     days = np.asarray(hours, dtype=np.float64) / 24.0
     vals = np.asarray(values, dtype=np.float64)
 
-    # Need at least 2 finite points for a slope
     mask = np.isfinite(days) & np.isfinite(vals)
     if mask.sum() < 2:
         return float("nan")
@@ -1173,60 +1346,45 @@ def compute_drift_percentages(
     hours_ref: np.ndarray,
     water_ref: np.ndarray,
     energy_ref: np.ndarray,
-) -> dict[str, float]:
+) -> Dict[str, float]:
+    """Compute percentage drift rates per day for mass, water, and energy.
+
+    Args:
+        hours_model: Forecast hours for model.
+        dry_model: Global dry air mass (Eg) at model steps.
+        water_model: Global water mass (kg) at model steps.
+        energy_model: Global total energy (J) at model steps.
+        hours_ref: Forecast hours for reference.
+        water_ref: Global water mass (kg) at reference steps.
+        energy_ref: Global total energy (J) at reference steps.
+
+    Returns:
+        Dict containing percentage drift rates (%/day) for dry mass, water mass, and total energy.
     """
-    Compute percentage drift rates from pre-collected time-series.
-
-    Parameters
-    ----------
-    hours_model : ndarray  – lead-times in hours for Model snapshots.
-    dry_model   : ndarray  – global dry-air mass (Eg) at each Model step.
-    water_model : ndarray  – global water mass (kg) at each Model step.
-    energy_model: ndarray  – global total energy (J) at each Model step.
-    hours_ref    : ndarray  – lead-times in hours for Reference snapshots.
-    water_ref    : ndarray  – global water mass (kg) at each Reference step.
-    energy_ref   : ndarray  – global total energy (J) at each Reference step.
-
-    Returns
-    -------
-    dict with keys ``dry_mass_drift_pct_per_day``,
-    ``water_mass_drift_pct_per_day``, ``total_energy_drift_pct_per_day``.
-
-    Dry mass uses internal drift:
-        (slope_model / model_ref) * 100   (%/day)
-
-    Water mass and energy use anomalous drift, where each trend is
-    normalised by its own starting value before taking the difference:
-        (slope_model / model_ref - slope_ref / ref_0) * 100   (%/day)
-
-    This is fairer than dividing the slope difference by a single
-    reference, because each source is measured on its own scale.
-
-    Reference values are taken from the first element (≈ 6 h).
-    """
-    slope_dry    = compute_drift_slope(hours_model, dry_model)
-    slope_water  = compute_drift_slope(hours_model, water_model)
+    slope_dry = compute_drift_slope(hours_model, dry_model)
+    slope_water = compute_drift_slope(hours_model, water_model)
     slope_energy = compute_drift_slope(hours_model, energy_model)
 
-    slope_water_ref  = compute_drift_slope(hours_ref, water_ref)
+    slope_water_ref = compute_drift_slope(hours_ref, water_ref)
     slope_energy_ref = compute_drift_slope(hours_ref, energy_ref)
 
-    dry_ref_0    = float(dry_model[0])
-    water_model_0 = float(water_model[0])
-    water_ref_0 = float(water_ref[0])
-    energy_model_0 = float(energy_model[0])
-    energy_ref_0 = float(energy_ref[0])
+    dry_ref_0 = float(dry_model[0]) if len(dry_model) > 0 else 0.0
+    water_model_0 = float(water_model[0]) if len(water_model) > 0 else 0.0
+    water_ref_0 = float(water_ref[0]) if len(water_ref) > 0 else 0.0
+    energy_model_0 = float(energy_model[0]) if len(energy_model) > 0 else 0.0
+    energy_ref_0 = float(energy_ref[0]) if len(energy_ref) > 0 else 0.0
 
-    def _safe_rel_pct(slope, ref):
-        """Compute (slope / ref) * 100, returning NaN on bad inputs."""
+    def _safe_rel_pct(slope: float, ref: float) -> float:
         if ref != 0 and np.isfinite(slope) and np.isfinite(ref):
             return (slope / ref) * 100.0
         return float("nan")
 
     return {
-        "dry_mass_drift_pct_per_day":     _safe_rel_pct(slope_dry, dry_ref_0),
-        "water_mass_drift_pct_per_day":   _safe_rel_pct(slope_water, water_model_0) - _safe_rel_pct(slope_water_ref, water_ref_0),
-        "total_energy_drift_pct_per_day": _safe_rel_pct(slope_energy, energy_model_0) - _safe_rel_pct(slope_energy_ref, energy_ref_0),
+        "dry_mass_drift_pct_per_day": _safe_rel_pct(slope_dry, dry_ref_0),
+        "water_mass_drift_pct_per_day": _safe_rel_pct(slope_water, water_model_0)
+        - _safe_rel_pct(slope_water_ref, water_ref_0),
+        "total_energy_drift_pct_per_day": _safe_rel_pct(slope_energy, energy_model_0)
+        - _safe_rel_pct(slope_energy_ref, energy_ref_0),
     }
 
 
@@ -1237,15 +1395,35 @@ def compute_conservation_scalars(
     z_sfc: xr.DataArray,
     level_dim: str = "level",
     levels: Optional[np.ndarray] = None,
-) -> tuple[float, float, float]:
-    """
-    Compute the three conservation scalars for a single 3-D snapshot.
+) -> Union[Tuple[float, float, float], Dict[Any, Tuple[float, float, float]]]:
+    """Compute the three conservation scalars (dry mass, water mass, total energy).
 
-    Returns
-    -------
-    (dry_mass_Eg, water_mass_kg, total_energy_J)
+    Ensemble Support:
+        If an ensemble dimension is detected in `ds`, computes conservation scalars for
+        each ensemble member and returns a dictionary mapping member IDs to (dry, water, energy) tuples.
+
+    Args:
+        ds: Dataset containing atmospheric state fields.
+        ps: Surface pressure DataArray.
+        area: Grid cell area DataArray (m²).
+        z_sfc: Surface geopotential DataArray.
+        level_dim: Pressure level dimension name.
+        levels: Optional array of pressure levels in hPa.
+
+    Returns:
+        Tuple of (dry_mass_Eg, water_mass_kg, total_energy_J) or Dict if ensemble.
     """
-    # Auto-detect level dimension if default is missing
+    ens_dim = _detect_ensemble_dim(ds)
+    if ens_dim is not None and ens_dim in ds.dims:
+        results = {}
+        for m in ds[ens_dim].values:
+            ds_m = ds.sel({ens_dim: m})
+            ps_m = ps.sel({ens_dim: m}) if ens_dim in ps.dims else ps
+            results[m] = compute_conservation_scalars(
+                ds_m, ps_m, area, z_sfc=z_sfc, level_dim=level_dim, levels=levels
+            )
+        return results
+
     if level_dim not in ds.dims:
         level_dim = _detect_level_dim(ds)
     if levels is None and level_dim in ds.coords:
@@ -1256,19 +1434,14 @@ def compute_conservation_scalars(
     has_q = q_name is not None
 
     if has_q:
-        tcwv = _compute_tcwv(ds, ps, q_name=q_name,
-                             level_dim=level_dim, levels=levels)
-        dry = compute_dry_air_mass(ds, ps, area, q_name=q_name,
-                                   level_dim=level_dim, levels=levels, tcwv=tcwv)
-        water = compute_water_mass(ds, ps, area, q_name=q_name,
-                                   level_dim=level_dim, levels=levels, tcwv=tcwv)
+        tcwv = _compute_tcwv(ds, ps, q_name=q_name, level_dim=level_dim, levels=levels)
+        dry = float(compute_dry_air_mass(ds, ps, area, q_name=q_name, level_dim=level_dim, levels=levels, tcwv=tcwv))
+        water = float(compute_water_mass(ds, ps, area, q_name=q_name, level_dim=level_dim, levels=levels, tcwv=tcwv))
         try:
-            energy = compute_total_energy(
-                ds, ps, area, z_sfc=z_sfc,
-                t_name=t_name, q_name=q_name,
-                level_dim=level_dim, levels=levels,
-            )
-        except Exception:
+            energy = float(compute_total_energy(
+                ds, ps, area, z_sfc=z_sfc, t_name=t_name, q_name=q_name, level_dim=level_dim, levels=levels
+            ))
+        except (ValueError, KeyError, AttributeError):
             energy = float("nan")
     else:
         dry = float("nan")
@@ -1278,21 +1451,30 @@ def compute_conservation_scalars(
     return dry, water, energy
 
 
-# ============================================================================
-# Pure Fixed-Level TCWV (no surface pressure)
-# ============================================================================
-
 def compute_pure_tcwv(
     ds: xr.Dataset,
     q_name: str = "q",
     level_dim: str = "level",
 ) -> xr.DataArray:
-    """
-    Integrate specific humidity purely over fixed pressure levels (no ps masking).
+    """Integrate specific humidity purely over fixed pressure levels without ps masking.
 
-    Trapezoidal rule: TCWV = (1/g) Σ 0.5·(q_k + q_{k+1}) · Δp_k
-    The highest pressure level (e.g. 1000 hPa) is treated as the column bottom.
+    Formula:
+        TCWV = (1/g) Σ 0.5·(q_k + q_{k+1}) · Δp_k
+
+    Args:
+        ds: Dataset containing specific humidity.
+        q_name: Variable name for specific humidity.
+        level_dim: Dimension name for pressure levels.
+
+    Returns:
+        xr.DataArray containing TCWV (kg/m²).
     """
+    if q_name not in ds.data_vars:
+        q_found = _find_var(ds, Q_NAMES)
+        if q_found is None:
+            raise KeyError(f"Specific humidity '{q_name}' not found in dataset.")
+        q_name = q_found
+
     q = ds[q_name]
     levels = ds[level_dim].values
     levels_pa = levels.astype(np.float64) * 100.0
@@ -1300,8 +1482,7 @@ def compute_pure_tcwv(
     levels_sorted = levels_pa[sort_idx]
     q_sorted = q.transpose(level_dim, ...).values[sort_idx]
 
-    # Standard trapezoidal integration W = (1/g) * sum(q * dp)
-    col = np.zeros_like(q_sorted[0])
+    col = np.zeros_like(q_sorted[0], dtype=np.float64)
     for k in range(len(levels_sorted) - 1):
         dp = levels_sorted[k + 1] - levels_sorted[k]
         q_avg = 0.5 * (q_sorted[k] + q_sorted[k + 1])
@@ -1315,6 +1496,8 @@ def compute_pure_tcwv(
         dims=[lat_dim, lon_dim],
         coords={lat_dim: q[lat_dim], lon_dim: q[lon_dim]},
         name="tcwv_pure",
-        attrs={"units": "kg/m²",
-               "long_name": "TCWV (fixed pressure levels, no surface pressure)"},
+        attrs={
+            "units": "kg/m²",
+            "long_name": "TCWV (fixed pressure levels, no surface pressure)",
+        },
     )
