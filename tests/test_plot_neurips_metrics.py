@@ -1,8 +1,6 @@
 """Unit tests for plot_neurips_metrics.py visualization utilities."""
 
-from pathlib import Path
 import pandas as pd
-import pytest
 
 from physmetrics_weather.plot_neurips_metrics import (
     get_model_baselines,

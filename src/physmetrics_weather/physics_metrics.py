@@ -28,7 +28,8 @@ Dependencies:
 from __future__ import annotations
 
 import warnings
-from typing import Any, Dict, List, Optional, Tuple, Union
+from dataclasses import dataclass, field
+from typing import Any, Dict, Optional, Tuple, Union
 
 import numpy as np
 import pyshtools as pysh
@@ -71,37 +72,69 @@ PRED_TD_NAMES: Tuple[str, ...] = ("prediction_timedelta", "lead_time", "step", "
 ENSEMBLE_DIM_NAMES: Tuple[str, ...] = ("ens", "realization", "member", "ensemble", "number")
 
 
-def _find_var(
-    ds: xr.Dataset,
-    candidates: Tuple[str, ...],
-) -> Optional[str]:
-    """Find the first variable name matching any candidate in the dataset.
+# ============================================================================
+# Structured Dataclasses & Domain Models
+# ============================================================================
 
-    Args:
-        ds: Input xarray Dataset.
-        candidates: Tuple of variable name strings to search for.
+@dataclass
+class MetricResult:
+    """Structured container for metric evaluation results.
 
-    Returns:
-        The matching variable name string if found, otherwise None.
+    Attributes:
+        name: Name of the evaluated metric.
+        value: Evaluation value (float for deterministic, dict for ensemble).
+        units: Physical units of the metric value.
+        description: Description of what the metric measures.
+        ensemble_member: Optional ensemble member identifier.
     """
-    for name in candidates:
-        if name in ds.data_vars:
-            return name
-    return None
+
+    name: str
+    value: Union[float, Dict[Any, float]]
+    units: str
+    description: str
+    ensemble_member: Optional[Any] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert metric result into a dictionary dictionary representation."""
+        return {
+            "name": self.name,
+            "value": self.value,
+            "units": self.units,
+            "description": self.description,
+            "ensemble_member": self.ensemble_member,
+        }
+
+
+class DatasetValidator:
+    """Helper utility for dataset validation and variable discovery."""
+
+    @staticmethod
+    def find_variable(ds: xr.Dataset, candidates: Tuple[str, ...]) -> Optional[str]:
+        """Find the first matching variable name in dataset."""
+        for name in candidates:
+            if name in ds.data_vars:
+                return name
+        return None
+
+    @staticmethod
+    def require_variable(ds: xr.Dataset, candidates: Tuple[str, ...], role: str) -> str:
+        """Find matching variable or raise informative KeyError."""
+        var = DatasetValidator.find_variable(ds, candidates)
+        if var is None:
+            raise KeyError(
+                f"Required variable for '{role}' not found in dataset. "
+                f"Tried candidates: {candidates}. Available variables: {list(ds.data_vars)}"
+            )
+        return var
+
+
+def _find_var(ds: xr.Dataset, candidates: Tuple[str, ...]) -> Optional[str]:
+    """Find the first variable name matching any candidate in the dataset."""
+    return DatasetValidator.find_variable(ds, candidates)
 
 
 def _detect_level_dim(ds: Union[xr.Dataset, xr.DataArray]) -> str:
-    """Auto-detect the name of the pressure-level dimension.
-
-    Args:
-        ds: Input xarray Dataset or DataArray.
-
-    Returns:
-        Name of the detected level dimension.
-
-    Raises:
-        ValueError: If no pressure-level dimension is found.
-    """
+    """Auto-detect the name of the pressure-level dimension."""
     for name in LEVEL_DIM_NAMES:
         if name in ds.dims:
             return name
@@ -112,14 +145,7 @@ def _detect_level_dim(ds: Union[xr.Dataset, xr.DataArray]) -> str:
 
 
 def _detect_pred_td_dim(ds: Union[xr.Dataset, xr.DataArray]) -> Optional[str]:
-    """Auto-detect the name of the prediction timedelta dimension.
-
-    Args:
-        ds: Input xarray Dataset or DataArray.
-
-    Returns:
-        Name of the detected prediction timedelta dimension, or None if absent.
-    """
+    """Auto-detect the name of the prediction timedelta dimension."""
     for name in PRED_TD_NAMES:
         if name in ds.dims:
             return name
@@ -127,14 +153,7 @@ def _detect_pred_td_dim(ds: Union[xr.Dataset, xr.DataArray]) -> Optional[str]:
 
 
 def _detect_ensemble_dim(ds: Union[xr.Dataset, xr.DataArray]) -> Optional[str]:
-    """Auto-detect the name of the ensemble dimension.
-
-    Args:
-        ds: Input xarray Dataset or DataArray.
-
-    Returns:
-        Name of the ensemble dimension if present, or None if deterministic.
-    """
+    """Auto-detect the name of the ensemble dimension."""
     for name in ENSEMBLE_DIM_NAMES:
         if name in ds.dims:
             return name
@@ -237,26 +256,16 @@ def derive_surface_pressure(
     Raises:
         ValueError: If MSL or surface geopotential variables are missing or grid mismatch > 1.
     """
-    msl_name = _find_var(ds, msl_names)
-    if msl_name is None:
-        raise ValueError(
-            f"No MSL variable found. Tried {msl_names}. Available: {list(ds.data_vars)}"
-        )
+    msl_name = DatasetValidator.require_variable(ds, msl_names, "Mean Sea Level Pressure")
     msl = ds[msl_name]
 
-    z_name = _find_var(ds_static, z_names)
-    if z_name is None:
-        raise ValueError(
-            f"No surface geopotential found. Tried {z_names}. Available: {list(ds_static.data_vars)}"
-        )
+    z_name = DatasetValidator.require_variable(ds_static, z_names, "Surface Geopotential")
     z_sfc = ds_static[z_name]
 
-    # Strip singleton time dimensions from static field
     for tdim in ("time", "valid_time"):
         if tdim in z_sfc.dims:
             z_sfc = z_sfc.isel({tdim: 0}, drop=True)
 
-    # Grid alignment check
     if lat_name in z_sfc.dims and lat_name in msl.dims:
         n_static = z_sfc.sizes[lat_name]
         n_target = msl.sizes[lat_name]
@@ -304,16 +313,14 @@ def _integrate_column(
 ) -> np.ndarray:
     """Trapezoidal column integration with surface-pressure masking.
 
-    Integrates (1/g) ∫₀^{Ps} field dp for a single 2D spatial slice.
-
     Args:
-        field_3d: Array of shape (nlevels, nlat, nlon).
-        levels_hpa: Pressure levels in hPa of shape (nlevels,).
-        ps_2d: Surface pressure array in Pa of shape (nlat, nlon).
+        field_3d: 3D numpy array of vertical field values (level, lat, lon).
+        levels_hpa: 1D numpy array of pressure levels in hPa.
+        ps_2d: 2D numpy array of surface pressure in Pa (lat, lon).
         gravity: Gravitational acceleration in m/s².
 
     Returns:
-        Integrated 2D array of shape (nlat, nlon).
+        2D numpy array of vertical column integrated values (lat, lon).
     """
     levels_pa = levels_hpa.astype(np.float64) * 100.0
     sort_idx = np.argsort(levels_pa)
@@ -323,11 +330,9 @@ def _integrate_column(
     n = len(levels_sorted)
     col = np.zeros_like(ps_2d, dtype=np.float64)
 
-    # Top of atmosphere to first pressure level
     dp_top = np.minimum(ps_2d, levels_sorted[0]) - 0.0
     col += field_sorted[0] * dp_top
 
-    # Interior pressure layers
     for k in range(n - 1):
         p_top = levels_sorted[k]
         p_bot = levels_sorted[k + 1]
@@ -339,7 +344,6 @@ def _integrate_column(
         field_avg = 0.5 * (field_sorted[k] + field_sorted[k + 1])
         col += field_avg * dp
 
-    # Lowest pressure level to surface
     dp_bottom = np.maximum(0.0, ps_2d - levels_sorted[-1])
     col += field_sorted[-1] * dp_bottom
 
@@ -357,7 +361,7 @@ def _ensure_ps_2d(ps: xr.DataArray) -> np.ndarray:
         2D numpy array of surface pressure.
 
     Raises:
-        ValueError: If array dimensions cannot be reduced to 2D.
+        ValueError: If surface pressure DataArray cannot be reduced to 2D.
     """
     arr = np.asarray(ps.values).squeeze()
     if arr.ndim == 0:
@@ -382,20 +386,17 @@ def _compute_tcwv(
     """Integrate specific humidity to Total Column Water Vapour (TCWV).
 
     Args:
-        ds: Dataset containing specific humidity.
+        ds: Input Dataset containing specific humidity.
         ps: Surface pressure DataArray.
-        q_name: Name of specific humidity variable.
-        level_dim: Name of level dimension.
+        q_name: Specific humidity variable name string.
+        level_dim: Pressure level dimension name string.
         levels: Optional array of pressure levels in hPa.
 
     Returns:
-        xr.DataArray containing TCWV (kg/m²).
+        2D DataArray containing TCWV values in kg/m².
     """
     if q_name not in ds.data_vars:
-        q_found = _find_var(ds, Q_NAMES)
-        if q_found is None:
-            raise KeyError(f"Specific humidity variable '{q_name}' not in dataset.")
-        q_name = q_found
+        q_name = DatasetValidator.require_variable(ds, Q_NAMES, "Specific Humidity")
 
     q = ds[q_name]
     if levels is None:
@@ -601,10 +602,16 @@ def compute_total_energy(
     if levels is None:
         levels = ds[level_dim].values
 
-    t_var = t_name if t_name in ds.data_vars else _find_var(ds, T_NAMES)
-    q_var = q_name if q_name in ds.data_vars else _find_var(ds, Q_NAMES)
-    if t_var is None or q_var is None:
-        raise ValueError(f"Temperature or humidity missing from dataset. Tried {T_NAMES}/{Q_NAMES}.")
+    t_var = (
+        t_name
+        if t_name in ds.data_vars
+        else DatasetValidator.require_variable(ds, T_NAMES, "Temperature")
+    )
+    q_var = (
+        q_name
+        if q_name in ds.data_vars
+        else DatasetValidator.require_variable(ds, Q_NAMES, "Specific Humidity")
+    )
 
     T = ds[t_var].transpose(level_dim, ...).values
     q = ds[q_var].transpose(level_dim, ...).values
@@ -629,12 +636,8 @@ def compute_total_energy(
     z_sfc_np = z_aligned.values
     z_sfc_3d = np.broadcast_to(z_sfc_np[None, :, :], (nlevels,) + z_sfc_np.shape)
 
-    u_var = _find_var(ds, u_names)
-    v_var = _find_var(ds, v_names)
-    if u_var is None or v_var is None:
-        raise ValueError(
-            f"u/v wind components required for KE calculation. Tried {u_names}/{v_names}."
-        )
+    u_var = DatasetValidator.require_variable(ds, u_names, "Zonal Wind (u)")
+    v_var = DatasetValidator.require_variable(ds, v_names, "Meridional Wind (v)")
 
     u_val = ds[u_var].transpose(level_dim, ...).values
     v_val = ds[v_var].transpose(level_dim, ...).values
@@ -664,14 +667,14 @@ def _ke_spectrum_spharm(
     """Compute spherical-harmonic kinetic energy spectrum E(l) using pyshtools.
 
     Args:
-        u: Zonal wind array (2D: lat, lon).
-        v: Meridional wind array (2D: lat, lon).
+        u: 2D numpy array of zonal wind component (lat, lon).
+        v: 2D numpy array of meridional wind component (lat, lon).
 
     Returns:
-        Tuple of (wavenumber_array, energy_array).
+        Tuple of (wavenumber_array, energy_spectrum_array).
 
     Raises:
-        ValueError: If input arrays are not 2D or grid dimensions are invalid.
+        ValueError: If input wind arrays are not 2D or grid is invalid Driscoll-Healy.
     """
     u = np.asarray(u, dtype=np.float64).squeeze()
     v = np.asarray(v, dtype=np.float64).squeeze()
@@ -696,7 +699,8 @@ def _ke_spectrum_spharm(
         lmax = nlat // 2 - 1
     else:
         raise ValueError(
-            f"Grid ({nlat}, {nlon}) is not a valid Driscoll-Healy grid (requires nlon == 2*nlat or nlon == nlat)."
+            f"Grid ({nlat}, {nlon}) is not a valid Driscoll-Healy grid "
+            f"(requires nlon == 2*nlat or nlon == nlat)."
         )
 
     u_c = pysh.expand.SHExpandDH(u, sampling=sampling, lmax_calc=lmax)
@@ -720,13 +724,13 @@ def _scalar_spectrum_spharm(
     """Compute spherical-harmonic power spectrum S(l) of a 2D scalar field.
 
     Args:
-        field: 2D scalar numpy array (lat, lon).
+        field: 2D numpy array of scalar values (lat, lon).
 
     Returns:
-        Tuple of (wavenumber_array, power_array).
+        Tuple of (wavenumber_array, power_spectrum_array).
 
     Raises:
-        ValueError: If input array is not 2D or grid dimensions are invalid.
+        ValueError: If field array is not 2D or grid is invalid Driscoll-Healy.
     """
     field = np.asarray(field, dtype=np.float64).squeeze()
 
@@ -750,7 +754,8 @@ def _scalar_spectrum_spharm(
         lmax = nlat // 2 - 1
     else:
         raise ValueError(
-            f"Grid ({nlat}, {nlon}) is not a valid Driscoll-Healy grid (requires nlon == 2*nlat or nlon == nlat)."
+            f"Grid ({nlat}, {nlon}) is not a valid Driscoll-Healy grid "
+            f"(requires nlon == 2*nlat or nlon == nlat)."
         )
 
     coeffs = pysh.expand.SHExpandDH(field, sampling=sampling, lmax_calc=lmax)
@@ -774,43 +779,41 @@ def compute_ke_spectrum(
     v_names: Tuple[str, ...] = V_NAMES,
     level_dim: str = "level",
 ) -> Union[Tuple[np.ndarray, np.ndarray], Dict[Any, Tuple[np.ndarray, np.ndarray]]]:
-    """Compute the kinetic energy spectrum E(l) at a pressure level.
-
-    Ensemble Support:
-        If an ensemble dimension is present, evaluates the KE spectrum for each
-        ensemble member and returns a dictionary mapping member IDs to (k, E) tuples.
+    """Compute the kinetic energy spectrum E(l) at a target pressure level.
 
     Args:
-        ds: Dataset containing zonal and meridional wind fields.
-        level: Pressure level in hPa (default 500).
+        ds: Input Dataset containing wind components.
+        level: Target pressure level in hPa (default: 500.0).
         u_names: Candidate variable names for zonal wind.
         v_names: Candidate variable names for meridional wind.
-        level_dim: Name of level dimension.
+        level_dim: Pressure level dimension name.
 
     Returns:
-        Tuple of (wavenumber, energy) arrays, or dict of tuples if ensemble.
+        Tuple of (wavenumber_array, energy_spectrum_array) for deterministic input,
+        or Dict[member_id, Tuple[wavenumber, energy]] for ensemble datasets.
 
     Raises:
-        ValueError: If wind components are missing.
+        KeyError: If wind variables cannot be found.
+        ValueError: If pressure level dimension cannot be detected.
     """
     ens_dim = _detect_ensemble_dim(ds)
     if ens_dim is not None and ens_dim in ds.dims:
         results = {}
         for m in ds[ens_dim].values:
             results[m] = compute_ke_spectrum(
-                ds.sel({ens_dim: m}), level=level, u_names=u_names, v_names=v_names, level_dim=level_dim
+                ds.sel({ens_dim: m}),
+                level=level,
+                u_names=u_names,
+                v_names=v_names,
+                level_dim=level_dim,
             )
         return results
 
     if level_dim not in ds.dims:
         level_dim = _detect_level_dim(ds)
 
-    u_var = _find_var(ds, u_names)
-    v_var = _find_var(ds, v_names)
-    if u_var is None or v_var is None:
-        raise ValueError(
-            f"u/v wind fields not found. Tried {u_names}/{v_names}. Available: {list(ds.data_vars)}"
-        )
+    u_var = DatasetValidator.require_variable(ds, u_names, "Zonal Wind (u)")
+    v_var = DatasetValidator.require_variable(ds, v_names, "Meridional Wind (v)")
 
     u = ds[u_var]
     v = ds[v_var]
@@ -836,23 +839,20 @@ def compute_q_spectrum(
     q_names: Tuple[str, ...] = Q_NAMES,
     level_dim: str = "level",
 ) -> Union[Tuple[np.ndarray, np.ndarray], Dict[Any, Tuple[np.ndarray, np.ndarray]]]:
-    """Compute the specific humidity power spectrum S_q(l) at a single pressure level.
-
-    Ensemble Support:
-        If an ensemble dimension is present, evaluates the Q spectrum for each
-        ensemble member and returns a dictionary of results.
+    """Compute specific humidity power spectrum S_q(l) at a single pressure level.
 
     Args:
-        ds: Dataset containing specific humidity.
-        level: Pressure level in hPa (default 500).
+        ds: Input Dataset containing specific humidity field.
+        level: Target pressure level in hPa (default: 500.0).
         q_names: Candidate variable names for specific humidity.
-        level_dim: Name of level dimension.
+        level_dim: Pressure level dimension name.
 
     Returns:
-        Tuple of (wavenumber, power) arrays, or dict of tuples if ensemble.
+        Tuple of (wavenumber_array, power_spectrum_array) for deterministic input,
+        or Dict[member_id, Tuple[wavenumber, power]] for ensemble datasets.
 
     Raises:
-        ValueError: If humidity variable is missing.
+        KeyError: If specific humidity variable cannot be found.
     """
     ens_dim = _detect_ensemble_dim(ds)
     if ens_dim is not None and ens_dim in ds.dims:
@@ -866,11 +866,7 @@ def compute_q_spectrum(
     if level_dim not in ds.dims:
         level_dim = _detect_level_dim(ds)
 
-    q_var = _find_var(ds, q_names)
-    if q_var is None:
-        raise ValueError(
-            f"Specific humidity variable not found. Tried {q_names}. Available: {list(ds.data_vars)}"
-        )
+    q_var = DatasetValidator.require_variable(ds, q_names, "Specific Humidity")
 
     q = ds[q_var]
     if level_dim in q.dims:
@@ -898,19 +894,19 @@ def _find_effective_resolution(
     """Calculate effective spatial resolution L_eff (km) where E_pred / E_true < threshold.
 
     Args:
-        k: Wavenumber array.
-        e_pred: Predicted spectrum array.
-        e_true: Target/Reference spectrum array.
-        threshold: Energy ratio threshold (default 0.5).
-        k_min: Minimum wavenumber to evaluate.
-        n_consecutive: Number of consecutive wavenumbers required below threshold.
+        k: 1D numpy array of spherical harmonic wavenumbers.
+        e_pred: Predicted spectrum energy array.
+        e_true: Reference ground-truth spectrum energy array.
+        threshold: Energy ratio threshold (default: 0.5).
+        k_min: Minimum wavenumber to start checking.
+        n_consecutive: Number of consecutive wavenumbers below threshold.
         earth_radius: Mean Earth radius in meters.
 
     Returns:
-        Tuple of (effective_resolution_km, small_scale_ratio).
+        Tuple of (effective_resolution_km, small_scale_energy_ratio).
 
     Raises:
-        ValueError: If spectrum array is too short.
+        ValueError: If spectrum length is shorter than n_consecutive.
     """
     mask = (k >= k_min) & (e_true > 1e-12)
     k_sel = k[mask]
@@ -920,7 +916,8 @@ def _find_effective_resolution(
     n = len(ratio)
     if n < n_consecutive:
         raise ValueError(
-            f"Spectrum too short ({n} wavenumbers). Need at least {n_consecutive} for effective resolution."
+            f"Spectrum too short ({n} wavenumbers). "
+            f"Need at least {n_consecutive} for effective resolution."
         )
 
     idx = None
@@ -954,12 +951,12 @@ def compute_spectral_scores(
     """Compute spectral divergence (1-Wasserstein) and spectral residual (log RMSE).
 
     Args:
-        e_pred: Predicted spectrum energy array.
-        e_true: Target spectrum energy array.
-        eps: Epsilon constant for numerical stability in log calculation.
+        e_pred: 1D numpy array of predicted spectrum power.
+        e_true: 1D numpy array of reference ground-truth spectrum power.
+        eps: Small epsilon numerical stabilizer for log calculations.
 
     Returns:
-        Tuple of (spectral_divergence, spectral_residual).
+        Tuple of (spectral_divergence_w1, spectral_residual_log_rmse).
     """
     k = np.arange(len(e_pred))
     spec_div = float(
@@ -1033,29 +1030,22 @@ def compute_hydrostatic_imbalance(
         level_dim = _detect_level_dim(ds)
     levels = ds[level_dim].values
 
-    if phi_name is None:
-        phi_name = _find_var(ds, PHI_NAMES)
-        if phi_name is None:
-            raise ValueError(f"Geopotential variable not found. Tried {PHI_NAMES}.")
-    if t_name is None:
-        t_name = _find_var(ds, T_NAMES)
-        if t_name is None:
-            raise ValueError(f"Temperature variable not found. Tried {T_NAMES}.")
-    if q_name not in ds.data_vars:
-        q_name = _find_var(ds, Q_NAMES) or q_name
+    phi_var = phi_name or DatasetValidator.require_variable(ds, PHI_NAMES, "Geopotential")
+    t_var = t_name or DatasetValidator.require_variable(ds, T_NAMES, "Temperature")
+    q_var = q_name if q_name in ds.data_vars else _find_var(ds, Q_NAMES)
 
     def _sel_level(var: str, p: float) -> xr.DataArray:
         idx = int(np.abs(levels - p).argmin())
         return ds[var].isel({level_dim: idx})
 
-    phi_top = _sel_level(phi_name, p_top)
-    phi_bot = _sel_level(phi_name, p_bot)
-    T_top = _sel_level(t_name, p_top)
-    T_bot = _sel_level(t_name, p_bot)
+    phi_top = _sel_level(phi_var, p_top)
+    phi_bot = _sel_level(phi_var, p_bot)
+    T_top = _sel_level(t_var, p_top)
+    T_bot = _sel_level(t_var, p_bot)
 
-    if q_name in ds.data_vars:
-        q_top = _sel_level(q_name, p_top)
-        q_bot = _sel_level(q_name, p_bot)
+    if q_var is not None and q_var in ds.data_vars:
+        q_top = _sel_level(q_var, p_top)
+        q_bot = _sel_level(q_var, p_bot)
         Tv_top = T_top * (1.0 + (R_V / R_DRY - 1) * q_top)
         Tv_bot = T_bot * (1.0 + (R_V / R_DRY - 1) * q_bot)
     else:
@@ -1101,35 +1091,29 @@ def compute_geostrophic_imbalance(
     """Compute geostrophic wind balance RMSE (m/s) at a given pressure level.
 
     Formula:
-        u_g = −(1 / fR) ∂Φ/∂φ
-        v_g = (1 / fR cosφ) ∂Φ/∂λ
-        RMSE = sqrt( AreaWeightedMean( (u - u_g)² + (v - v_g)² ) )
-        outside equatorial band (±lat_cutoff°).
-
-    Ensemble Support:
-        If `ds` contains an ensemble dimension, evaluates geostrophic balance per
-        member and returns a dictionary mapping member IDs to RMSE values.
+        f u_g = -∂Φ/∂y,  f v_g = ∂Φ/∂x
+        Error = sqrt(area_weighted_mean((u - u_g)² + (v - v_g)²))
 
     Args:
-        ds: Dataset containing geopotential and wind fields.
+        ds: Input Dataset containing geopotential and wind components.
         area: Grid cell area DataArray (m²).
         phi_name: Geopotential variable name.
-        u_names: Candidate variable names for zonal wind.
-        v_names: Candidate variable names for meridional wind.
-        level: Target pressure level in hPa.
+        u_names: Zonal wind variable name candidates.
+        v_names: Meridional wind variable name candidates.
+        level: Target pressure level in hPa (default: 500.0).
         level_dim: Pressure level dimension name.
         lat_name: Latitude coordinate name.
         lon_name: Longitude coordinate name.
-        lat_cutoff: Equatorial exclusion boundary in degrees.
-        earth_radius: Earth radius in meters.
-        omega: Angular velocity of Earth in rad/s.
+        lat_cutoff: Latitude cutoff in degrees (excluding tropics near equator).
+        earth_radius: Mean Earth radius in meters.
+        omega: Earth angular rotation velocity in rad/s.
 
     Returns:
-        Float (if deterministic) or Dict[member, float] (if ensemble) of
-        geostrophic imbalance RMSE in m/s.
+        Float (if deterministic) or Dict[member, float] (if ensemble) representing
+        area-weighted geostrophic balance RMSE in m/s.
 
     Raises:
-        ValueError: If geopotential or wind fields are missing.
+        KeyError: If geopotential or wind variables are missing.
     """
     ens_dim = _detect_ensemble_dim(ds)
     if ens_dim is not None and ens_dim in ds.dims:
@@ -1149,18 +1133,17 @@ def compute_geostrophic_imbalance(
     levels = ds[level_dim].values
     idx = int(np.abs(levels - level).argmin())
 
-    phi_var = phi_name if phi_name in ds.data_vars else _find_var(ds, PHI_NAMES)
-    if phi_var is None:
-        raise ValueError(f"Geopotential variable not found. Tried {PHI_NAMES}.")
-
+    phi_var = (
+        phi_name
+        if phi_name in ds.data_vars
+        else DatasetValidator.require_variable(ds, PHI_NAMES, "Geopotential")
+    )
     phi = ds[phi_var]
     if level_dim in phi.dims:
         phi = phi.isel({level_dim: idx})
 
-    u_var = _find_var(ds, u_names)
-    v_var = _find_var(ds, v_names)
-    if u_var is None or v_var is None:
-        raise ValueError(f"u/v wind not found. Tried {u_names}/{v_names}.")
+    u_var = DatasetValidator.require_variable(ds, u_names, "Zonal Wind (u)")
+    v_var = DatasetValidator.require_variable(ds, v_names, "Meridional Wind (v)")
 
     u_actual = ds[u_var]
     v_actual = ds[v_var]
@@ -1235,24 +1218,17 @@ def compute_lapse_rate_wasserstein(
 ) -> Dict[str, float]:
     """Compute 1D Wasserstein distance of lapse rate distribution for geographic bands.
 
-    Calculates lapse rate Γ between 500 hPa and 850 hPa in K/km for Tropics,
-    Northern Hemisphere mid-latitudes, and Southern Hemisphere mid-latitudes.
-
-    Ensemble Support:
-        If `ds_pred` contains an ensemble dimension, computes the mean predicted
-        lapse rate across members before calculating Wasserstein distance against reference.
-
     Args:
-        ds_pred: Predicted dataset containing temperature and geopotential.
-        ds_ref: Reference dataset containing temperature and geopotential.
-        area: Grid cell area DataArray.
-        t_name: Variable name for temperature.
-        phi_name: Variable name for geopotential.
-        level_dim_pred: Level dimension name for prediction dataset.
-        level_dim_ref: Level dimension name for reference dataset.
+        ds_pred: Model prediction Dataset.
+        ds_ref: Ground-truth reference Dataset.
+        area: Grid cell area DataArray (m²).
+        t_name: Temperature variable name.
+        phi_name: Geopotential variable name.
+        level_dim_pred: Pressure level dimension name for model prediction.
+        level_dim_ref: Pressure level dimension name for reference.
 
     Returns:
-        Dict mapping region key to Wasserstein distance (W1) in K/km.
+        Dictionary mapping regional band keys to 1-Wasserstein distances (K/km).
     """
     ens_dim_p = _detect_ensemble_dim(ds_pred)
     if ens_dim_p is not None and ens_dim_p in ds_pred.dims:
@@ -1321,11 +1297,11 @@ def compute_drift_slope(
     """Compute linear regression slope expressed as change per day.
 
     Args:
-        hours: Array of lead times in hours.
-        values: Array of metric values at each lead time.
+        hours: 1D numpy array of forecast lead times in hours.
+        values: 1D numpy array of evaluated metric values.
 
     Returns:
-        Linear slope expressed as change per fractional day. Returns NaN if <2 points.
+        Linear drift slope value per day. Returns nan if fewer than 2 valid points.
     """
     days = np.asarray(hours, dtype=np.float64) / 24.0
     vals = np.asarray(values, dtype=np.float64)
@@ -1350,16 +1326,16 @@ def compute_drift_percentages(
     """Compute percentage drift rates per day for mass, water, and energy.
 
     Args:
-        hours_model: Forecast hours for model.
-        dry_model: Global dry air mass (Eg) at model steps.
-        water_model: Global water mass (kg) at model steps.
-        energy_model: Global total energy (J) at model steps.
-        hours_ref: Forecast hours for reference.
-        water_ref: Global water mass (kg) at reference steps.
-        energy_ref: Global total energy (J) at reference steps.
+        hours_model: Model forecast hours array.
+        dry_model: Model global dry air mass values array (Eg).
+        water_model: Model global water mass values array (kg).
+        energy_model: Model global total energy values array (J).
+        hours_ref: Reference ground-truth hours array.
+        water_ref: Reference ground-truth water mass values array (kg).
+        energy_ref: Reference ground-truth total energy values array (J).
 
     Returns:
-        Dict containing percentage drift rates (%/day) for dry mass, water mass, and total energy.
+        Dictionary mapping drift metric names to relative %/day drift rates.
     """
     slope_dry = compute_drift_slope(hours_model, dry_model)
     slope_water = compute_drift_slope(hours_model, water_model)
@@ -1398,12 +1374,8 @@ def compute_conservation_scalars(
 ) -> Union[Tuple[float, float, float], Dict[Any, Tuple[float, float, float]]]:
     """Compute the three conservation scalars (dry mass, water mass, total energy).
 
-    Ensemble Support:
-        If an ensemble dimension is detected in `ds`, computes conservation scalars for
-        each ensemble member and returns a dictionary mapping member IDs to (dry, water, energy) tuples.
-
     Args:
-        ds: Dataset containing atmospheric state fields.
+        ds: Input Dataset containing atmospheric state variables.
         ps: Surface pressure DataArray.
         area: Grid cell area DataArray (m²).
         z_sfc: Surface geopotential DataArray.
@@ -1411,7 +1383,8 @@ def compute_conservation_scalars(
         levels: Optional array of pressure levels in hPa.
 
     Returns:
-        Tuple of (dry_mass_Eg, water_mass_kg, total_energy_J) or Dict if ensemble.
+        Tuple of (dry_mass_Eg, water_mass_kg, total_energy_J) for deterministic inputs,
+        or Dict[member, Tuple[dry, water, energy]] for ensemble datasets.
     """
     ens_dim = _detect_ensemble_dim(ds)
     if ens_dim is not None and ens_dim in ds.dims:
@@ -1435,11 +1408,16 @@ def compute_conservation_scalars(
 
     if has_q:
         tcwv = _compute_tcwv(ds, ps, q_name=q_name, level_dim=level_dim, levels=levels)
-        dry = float(compute_dry_air_mass(ds, ps, area, q_name=q_name, level_dim=level_dim, levels=levels, tcwv=tcwv))
-        water = float(compute_water_mass(ds, ps, area, q_name=q_name, level_dim=level_dim, levels=levels, tcwv=tcwv))
+        dry = float(compute_dry_air_mass(
+            ds, ps, area, q_name=q_name, level_dim=level_dim, levels=levels, tcwv=tcwv
+        ))
+        water = float(compute_water_mass(
+            ds, ps, area, q_name=q_name, level_dim=level_dim, levels=levels, tcwv=tcwv
+        ))
         try:
             energy = float(compute_total_energy(
-                ds, ps, area, z_sfc=z_sfc, t_name=t_name, q_name=q_name, level_dim=level_dim, levels=levels
+                ds, ps, area, z_sfc=z_sfc, t_name=t_name, q_name=q_name,
+                level_dim=level_dim, levels=levels
             ))
         except (ValueError, KeyError, AttributeError):
             energy = float("nan")
@@ -1458,22 +1436,19 @@ def compute_pure_tcwv(
 ) -> xr.DataArray:
     """Integrate specific humidity purely over fixed pressure levels without ps masking.
 
-    Formula:
-        TCWV = (1/g) Σ 0.5·(q_k + q_{k+1}) · Δp_k
-
     Args:
-        ds: Dataset containing specific humidity.
+        ds: Input Dataset containing specific humidity.
         q_name: Variable name for specific humidity.
-        level_dim: Dimension name for pressure levels.
+        level_dim: Pressure level dimension name.
 
     Returns:
-        xr.DataArray containing TCWV (kg/m²).
+        2D DataArray containing unmasked TCWV values in kg/m².
+
+    Raises:
+        KeyError: If specific humidity variable is not found in dataset.
     """
     if q_name not in ds.data_vars:
-        q_found = _find_var(ds, Q_NAMES)
-        if q_found is None:
-            raise KeyError(f"Specific humidity '{q_name}' not found in dataset.")
-        q_name = q_found
+        q_name = DatasetValidator.require_variable(ds, Q_NAMES, "Specific Humidity")
 
     q = ds[q_name]
     levels = ds[level_dim].values

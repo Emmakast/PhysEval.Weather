@@ -1,22 +1,21 @@
 Usage Guide
 ===========
 
-``physmetrics-weather`` provides two command-line interface (CLI) utilities: ``physmetrics-run`` for evaluation streaming and metric calculation, and ``physmetrics-plot`` for visualization.
+``physmetrics-weather`` provides both command-line interface (CLI) utilities and a Python object-oriented API for metric calculation and visualization.
+
+1. Command-Line Interface (CLI)
+-------------------------------
 
 Running Metric Evaluation (physmetrics-run)
--------------------------------------------
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The ``physmetrics-run`` command streams model predictions and reference datasets, evaluating all physical metrics.
-
-Command Syntax
-~~~~~~~~~~~~~~
 
 .. code-block:: bash
 
    physmetrics-run [OPTIONS]
 
-Key Options
-~~~~~~~~~~~
+Key CLI Options:
 
 * ``--year INTEGER``: Year to evaluate (default: 2022).
 * ``--dates STRING [STRING ...]``: Specific ISO dates to evaluate (e.g. ``2022-01-01 2022-01-15``).
@@ -29,49 +28,85 @@ Key Options
 * ``--output PATH``: Custom destination CSV file path.
 * ``--mode {joint,ref,prediction,model}``: Evaluation mode (default: ``joint``).
 
-Example Commands
-~~~~~~~~~~~~~~~~
-
-Evaluate single model over specific dates:
-
-.. code-block:: bash
-
-   physmetrics-run --dates 2022-01-01 2022-01-15 --model aurora --workers 4
-
-Evaluate custom Zarr prediction dataset:
+CLI Example:
 
 .. code-block:: bash
 
    physmetrics-run \
      --prediction-zarr gs://weatherbench2/datasets/aurora/2022-1440x721.zarr \
      --model aurora \
+     --dates 2022-01-01 2022-01-15 \
      --output-dir ./results
 
 Generating Visualizations (physmetrics-plot)
---------------------------------------------
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The ``physmetrics-plot`` command reads the generated long-format CSV files and renders publication-ready plots.
-
-Command Syntax
-~~~~~~~~~~~~~~
+The ``physmetrics-plot`` command reads long-format CSV files and renders publication-ready plots.
 
 .. code-block:: bash
 
    physmetrics-plot --results-dir ./results --outdir ./plots
 
-Key Options
-~~~~~~~~~~~
+2. Python API Usage
+-------------------
 
-* ``--results-dir PATH``: Path to directory containing output CSV files (default: ``./results``).
-* ``--outdir PATH``: Destination directory for generated plots (default: ``./plots``).
-* ``--reference-label {ERA5,IFS}``: Reference dataset label override for plot legends.
+Running Evaluation Pipelines
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Use ``EvaluationConfig`` and ``EvaluationPipeline`` to run evaluation workflows programmatically:
+
+.. code-block:: python
+
+   from pathlib import Path
+   from physmetrics_weather import EvaluationConfig, EvaluationPipeline
+
+   # 1. Define configuration settings
+   config = EvaluationConfig(
+       dates=["2022-01-01", "2022-01-02"],
+       prediction_zarr="gs://weatherbench2/datasets/aurora/2022-1440x721.zarr",
+       model_name="aurora",
+       output_csv=Path("./results/physics_evaluation_aurora_2022.csv"),
+       workers=4,
+   )
+
+   # 2. Execute pipeline
+   pipeline = EvaluationPipeline(config)
+   df = pipeline.run()
+
+   print(f"Evaluated {len(df)} metric records.")
+
+Rendering Diagnostic Figures
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Use ``PlotterConfig`` and ``PhysicsPlotter`` to generate figure plots programmatically:
+
+.. code-block:: python
+
+   from pathlib import Path
+   from physmetrics_weather import PlotterConfig, PhysicsPlotter
+
+   # 1. Configure plotter
+   config = PlotterConfig(
+       results_dir=Path("./results"),
+       outdir=Path("./plots"),
+       style="whitegrid",
+       dpi=300,
+       file_format="png",
+   )
+
+   # 2. Render plots
+   plotter = PhysicsPlotter(config)
+   plot_paths = plotter.generate_all()
+
+   for path in plot_paths:
+       print(f"Saved plot: {path}")
 
 Generated Figures
-~~~~~~~~~~~~~~~~~
+-----------------
 
 * ``ts_dry_mass_Eg.png``: Dry air mass relative drift timeseries.
 * ``ts_water_mass_kg.png``: Atmospheric water mass relative drift timeseries.
 * ``ts_total_energy_J.png``: Total atmospheric energy relative drift timeseries.
 * ``ts_hydrostatic_rmse.png``: Hydrostatic balance RMSE timeseries.
 * ``ts_geostrophic_rmse.png``: Geostrophic balance RMSE timeseries.
-* ``spectra_ke_12h.png``, ``spectra_ke_120h.png``, ``spectra_ke_240h.png``: Kinetic energy spectra at lead times.
+* ``spectra_ke_*.png``: Kinetic energy spectra at lead times.

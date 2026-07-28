@@ -1,4 +1,4 @@
-# PhysMetrics.Weather
+# PhysMetrics.Weather (physmetrics-weather)
 
 An open-source, unified framework for evaluating the **physical consistency**, **spectral resolution**, and **atmospheric balance** of Machine Learning Weather Prediction (MLWP) models.
 
@@ -74,7 +74,7 @@ After installation, the CLI commands `physmetrics-run` and `physmetrics-plot` ar
 
 ---
 
-## Data Inputs & Usage
+## Data Inputs & CLI Usage
 
 ### 1. WeatherBench 2 Streaming (No Download Required)
 
@@ -118,7 +118,7 @@ Required variable names (or standard aliases):
 | Option | Default | Description |
 |---|---|---|
 | `--year` | `2022` | Year to evaluate |
-| `--dates` | — | Specific dates, e.g. `2022-01-01 2022-01-15` |
+| `--dates` | — | Specific ISO dates, e.g. `2022-01-01 2022-01-15` |
 | `--month` | — | Specific month, e.g. `2022-01` |
 | `--model` | `model` | Model name identifier |
 | `--prediction-zarr` | WB2 path | Zarr store URL or local path for model predictions |
@@ -126,8 +126,10 @@ Required variable names (or standard aliases):
 | `--lead-times` | `12h,5d,10d` | Comma-separated forecast lead times |
 | `--workers` | `4` | Parallel worker process count |
 | `--output-dir` | `./results` | Directory for output CSV results |
-| `--extended-spectra` | off | Also compute 850 hPa KE spectrum and Q spectrum |
-| `--quiet` | off | Suppress verbose logging |
+| `--output` | — | Custom destination CSV file path |
+| `--mode` | `joint` | Evaluation mode (`joint`, `ref`, `prediction`, `model`) |
+| `--extended-spectra` | off | Compute additional Q and 850 hPa spectra |
+| `--quiet` | off | Suppress verbose progress logging |
 
 ### `physmetrics-plot`
 
@@ -139,7 +141,50 @@ physmetrics-plot --results-dir ./results --outdir ./plots
 |---|---|---|
 | `--results-dir` | `./results` | Path to directory containing output CSV files |
 | `--outdir` | `./plots` | Path to directory for saving generated figures |
-| `--reference-label` | auto | Reference label override for legends (`ERA5` or `IFS`) |
+| `--reference-label` | `auto` | Reference dataset label override (`auto`, `ERA5`, `IFS`) |
+
+---
+
+## Python API Usage
+
+### Object-Oriented Evaluation Pipeline
+
+Run evaluation workflows programmatically using `EvaluationConfig` and `EvaluationPipeline`:
+
+```python
+from pathlib import Path
+from physmetrics_weather import EvaluationConfig, EvaluationPipeline
+
+config = EvaluationConfig(
+    dates=["2022-01-01", "2022-01-02"],
+    prediction_zarr="gs://weatherbench2/datasets/aurora/2022-1440x721.zarr",
+    model_name="aurora",
+    output_csv=Path("./results/physics_evaluation_aurora_2022.csv"),
+    workers=4,
+)
+
+pipeline = EvaluationPipeline(config)
+df = pipeline.run()
+```
+
+### Object-Oriented Plotter
+
+Render diagnostic plots programmatically using `PlotterConfig` and `PhysicsPlotter`:
+
+```python
+from pathlib import Path
+from physmetrics_weather import PlotterConfig, PhysicsPlotter
+
+config = PlotterConfig(
+    results_dir=Path("./results"),
+    outdir=Path("./plots"),
+    style="whitegrid",
+    dpi=300,
+)
+
+plotter = PhysicsPlotter(config)
+plots = plotter.generate_all()
+```
 
 ---
 

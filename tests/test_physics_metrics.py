@@ -49,7 +49,10 @@ def mock_deterministic_ds(mock_grid_coords):
     q = np.abs(np.random.randn(*shape_3d) * 0.005)
     u = np.random.randn(*shape_3d) * 10.0
     v = np.random.randn(*shape_3d) * 10.0
-    phi = np.broadcast_to(levels[:, None, None] * 100.0, shape_3d) + np.random.randn(*shape_3d) * 10.0
+    phi = (
+        np.broadcast_to(levels[:, None, None] * 100.0, shape_3d)
+        + np.random.randn(*shape_3d) * 10.0
+    )
     msl = 101325.0 + np.random.randn(*shape_2d) * 500.0
     sp = 100000.0 + np.random.randn(*shape_2d) * 1000.0
 
@@ -196,7 +199,9 @@ def test_compute_total_energy(mock_deterministic_ds, mock_static_ds, mock_ensemb
     assert isinstance(te_det, float)
     assert te_det > 0
 
-    te_ens = compute_total_energy(mock_ensemble_ds, mock_ensemble_ds["surface_pressure"], area, z_sfc=z_sfc)
+    te_ens = compute_total_energy(
+        mock_ensemble_ds, mock_ensemble_ds["surface_pressure"], area, z_sfc=z_sfc
+    )
     assert isinstance(te_ens, dict)
     assert len(te_ens) == 3
 
@@ -294,7 +299,9 @@ def test_compute_conservation_scalars(mock_deterministic_ds, mock_static_ds, moc
     assert isinstance(scalars_det, tuple)
     assert len(scalars_det) == 3
 
-    scalars_ens = compute_conservation_scalars(mock_ensemble_ds, mock_ensemble_ds["surface_pressure"], area, z_sfc=z_sfc)
+    scalars_ens = compute_conservation_scalars(
+        mock_ensemble_ds, mock_ensemble_ds["surface_pressure"], area, z_sfc=z_sfc
+    )
     assert isinstance(scalars_ens, dict)
     assert len(scalars_ens) == 3
 
