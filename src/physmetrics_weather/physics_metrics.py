@@ -54,6 +54,22 @@ R_V: float = 461.5                 # J/(kg·K) – specific gas constant, water 
 
 
 # ============================================================================
+# Default Evaluation Metric Levels & Threshold Constants
+# ============================================================================
+
+DEFAULT_SPECTRUM_LEVEL: float = 500.0        # hPa – default pressure level for spectra
+DEFAULT_KE_850_LEVEL: float = 850.0          # hPa – secondary level for boundary layer KE
+HYDROSTATIC_P_TOP: float = 500.0            # hPa – upper level for hydrostatic error
+HYDROSTATIC_P_BOT: float = 850.0            # hPa – lower level for hydrostatic error
+GEOSTROPHIC_LEVEL: float = 500.0            # hPa – pressure level for geostrophic balance
+GEOSTROPHIC_LAT_CUTOFF: float = 20.0        # deg – equatorial exclusion zone latitude
+LAPSE_RATE_P_TOP: float = 500.0             # hPa – upper pressure level for lapse rate
+LAPSE_RATE_P_BOT: float = 850.0             # hPa – lower pressure level for lapse rate
+EFFECTIVE_RES_THRESHOLD: float = 0.5        # spectral power ratio cutoff threshold
+EFFECTIVE_RES_K_MIN: int = 10               # minimum wavenumber for effective resolution
+
+
+# ============================================================================
 # Variable & Dimension Names
 # ============================================================================
 
@@ -774,7 +790,7 @@ def _scalar_spectrum_spharm(
 
 def compute_ke_spectrum(
     ds: xr.Dataset,
-    level: float = 500.0,
+    level: float = DEFAULT_SPECTRUM_LEVEL,
     u_names: Tuple[str, ...] = U_NAMES,
     v_names: Tuple[str, ...] = V_NAMES,
     level_dim: str = "level",
@@ -835,7 +851,7 @@ def compute_ke_spectrum(
 
 def compute_q_spectrum(
     ds: xr.Dataset,
-    level: float = 500.0,
+    level: float = DEFAULT_SPECTRUM_LEVEL,
     q_names: Tuple[str, ...] = Q_NAMES,
     level_dim: str = "level",
 ) -> Union[Tuple[np.ndarray, np.ndarray], Dict[Any, Tuple[np.ndarray, np.ndarray]]]:
@@ -893,7 +909,7 @@ VAR_ALIASES: Dict[str, Tuple[str, ...]] = {
 def compute_scalar_spectrum(
     ds: xr.Dataset,
     var_name: str,
-    level: float = 500.0,
+    level: float = DEFAULT_SPECTRUM_LEVEL,
     level_dim: str = "level",
 ) -> Union[Tuple[np.ndarray, np.ndarray], Dict[Any, Tuple[np.ndarray, np.ndarray]]]:
     """Compute spherical-harmonic power spectrum S(l) of any scalar variable at a level.
@@ -947,8 +963,8 @@ def _find_effective_resolution(
     k: np.ndarray,
     e_pred: np.ndarray,
     e_true: np.ndarray,
-    threshold: float = 0.5,
-    k_min: int = 10,
+    threshold: float = EFFECTIVE_RES_THRESHOLD,
+    k_min: int = EFFECTIVE_RES_K_MIN,
     n_consecutive: int = 5,
     earth_radius: float = EARTH_RADIUS,
 ) -> Tuple[float, float]:
@@ -1044,8 +1060,8 @@ def compute_hydrostatic_imbalance(
     q_name: str = "q",
     level_dim: str = "level",
     lat_name: str = "latitude",
-    p_top: float = 500.0,
-    p_bot: float = 850.0,
+    p_top: float = HYDROSTATIC_P_TOP,
+    p_bot: float = HYDROSTATIC_P_BOT,
     r_dry: float = R_DRY,
 ) -> Union[float, Dict[Any, float]]:
     """Compute hydrostatic balance error RMSE (m²/s²) between p_top and p_bot.
@@ -1138,14 +1154,14 @@ def compute_hydrostatic_imbalance(
 def compute_geostrophic_imbalance(
     ds: xr.Dataset,
     area: xr.DataArray,
-    phi_name: str = "geopotential",
+    phi_name: Optional[str] = None,
     u_names: Tuple[str, ...] = U_NAMES,
     v_names: Tuple[str, ...] = V_NAMES,
-    level: float = 500.0,
+    level: float = GEOSTROPHIC_LEVEL,
     level_dim: str = "level",
     lat_name: str = "latitude",
     lon_name: str = "longitude",
-    lat_cutoff: float = 10.0,
+    lat_cutoff: float = GEOSTROPHIC_LAT_CUTOFF,
     earth_radius: float = EARTH_RADIUS,
     omega: float = OMEGA,
 ) -> Union[float, Dict[Any, float]]:
@@ -1276,6 +1292,8 @@ def compute_lapse_rate_wasserstein(
     phi_name: Optional[str] = None,
     level_dim_pred: Optional[str] = None,
     level_dim_ref: Optional[str] = None,
+    p_top: float = LAPSE_RATE_P_TOP,
+    p_bot: float = LAPSE_RATE_P_BOT,
 ) -> Dict[str, float]:
     """Compute 1D Wasserstein distance of lapse rate distribution for geographic bands.
 
@@ -1287,6 +1305,8 @@ def compute_lapse_rate_wasserstein(
         phi_name: Geopotential variable name.
         level_dim_pred: Pressure level dimension name for model prediction.
         level_dim_ref: Pressure level dimension name for reference.
+        p_top: Upper pressure level in hPa (default: LAPSE_RATE_P_TOP = 500.0).
+        p_bot: Lower pressure level in hPa (default: LAPSE_RATE_P_BOT = 850.0).
 
     Returns:
         Dictionary mapping regional band keys to 1-Wasserstein distances (K/km).
@@ -1304,11 +1324,14 @@ def compute_lapse_rate_wasserstein(
     ld_r = level_dim_ref or _detect_level_dim(ds_ref)
 
     def _calc_gamma(ds: xr.Dataset, t_var: str, phi_var: str, ld: str) -> xr.DataArray:
-        t_500 = ds[t_var].sel({ld: 500})
-        t_850 = ds[t_var].sel({ld: 850})
-        phi_500 = ds[phi_var].sel({ld: 500})
-        phi_850 = ds[phi_var].sel({ld: 850})
-        return -GRAVITY * (t_500 - t_850) / (phi_500 - phi_850) * 1000.0
+        levels = ds[ld].values
+        idx_top = int(np.abs(levels - p_top).argmin())
+        idx_bot = int(np.abs(levels - p_bot).argmin())
+        t_top = ds[t_var].isel({ld: idx_top})
+        t_bot = ds[t_var].isel({ld: idx_bot})
+        phi_top = ds[phi_var].isel({ld: idx_top})
+        phi_bot = ds[phi_var].isel({ld: idx_bot})
+        return -GRAVITY * (t_top - t_bot) / (phi_top - phi_bot) * 1000.0
 
     gamma_p = _calc_gamma(ds_pred, t_name_p, phi_name_p, ld_p)
     gamma_r = _calc_gamma(ds_ref, t_name_r, phi_name_r, ld_r)
