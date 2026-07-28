@@ -1,27 +1,48 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "physeval-weather"
 version = "0.1.0"
-description = "Physics metrics for evaluating AI weather models"
+description = "Evaluation framework for physical consistency of AI weather models"
 readme = "README.md"
-license = { text = "MIT" }
-dependencies = [    "numpy",
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+    { name = "Emma Kasteleyn" },
+    { name = "Timo Maier", email = "timo.maier@tum.de" }
+]
+dependencies = [
+    "numpy",
     "pandas",
     "xarray",
     "dask",
     "matplotlib",
     "seaborn",
     "scipy",
-    "zarr", 
-    "gcsfs"
+    "zarr",
+    "gcsfs",
+    "pyshtools"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+    "sphinx>=5.0",
+    "sphinx-rtd-theme",
+    "myst-parser"
+]
+docs = [
+    "sphinx>=5.0",
+    "sphinx-rtd-theme",
+    "myst-parser"
 ]
 
 [project.scripts]
-physeval-run = "physeval_weather.run_all_metrics:main"
-physeval-plot = "physeval_weather.plot_neurips_metrics:main"
+physeval-run = "physmetrics_weather.run_all_metrics:main"
+physeval-plot = "physmetrics_weather.plot_neurips_metrics:main"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/physeval_weather"]
-
-[build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
+[tool.setuptools.packages.find]
+where = ["src"]
