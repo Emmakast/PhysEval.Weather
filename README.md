@@ -14,20 +14,18 @@ It computes diagnostic physical metrics against ERA5 or IFS HRES reference datas
 ---
 
 ## Key Metrics Evaluated
-
 | Metric Category | Metric | What it measures |
 |---|---|---|
 | **Conservation & Stability** | **Dry Air Mass drift** | Is global dry-air mass conserved over time? (Exagrams, %/day) |
 | | **Water Mass drift** | Is global total atmospheric water mass conserved? (kg, %/day) |
 | | **Total Energy drift** | Is global total atmospheric energy conserved? (Joules, %/day) |
-| **Spectral Skill** | **Kinetic Energy Spectrum** | Spherical harmonic KE spectrum at 500 hPa & 850 hPa |
-| | **Humidity Spectrum** | Power spectrum of specific humidity at 500 hPa |
-| | **Effective Resolution ($L_{eff}$)** | Spatial scale (km) where model loses skill vs. reference |
+| **Spectral Skill** | **Effective Resolution ($L_{eff}$)** | Spatial scale (km) where model loses skill vs. reference |
 | | **Spectral Divergence** | 1-Wasserstein distance between true and predicted spectra |
 | | **Spectral Residual** | Log-RMSE difference between energy spectra |
 | **Atmospheric Balance** | **Hydrostatic Balance** | Hypsometric balance error RMSE ($m^2/s^2$) between 500 & 850 hPa |
 | | **Geostrophic Balance** | Area-weighted wind balance RMSE ($m/s$) at 500 hPa |
-| **Thermal Structure** | **Lapse Rate Wasserstein** | Environmental lapse rate distribution distance across geographical bands |
+| | **Lapse Rate Wasserstein** | Lapse rate distribution distance across geographical bands |
+
 
 ---
 
