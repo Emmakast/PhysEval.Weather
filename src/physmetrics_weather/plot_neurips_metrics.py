@@ -16,7 +16,9 @@ Output Plots:
     3. ts_total_energy_J.png    — Global total energy drift timeseries
     4. ts_hydrostatic_rmse.png  — Hydrostatic balance error timeseries
     5. ts_geostrophic_rmse.png  — Geostrophic balance error timeseries
-    6. spectra_ke_*.png         — Kinetic energy spectra at forecast lead times
+    6. neurips_table_*.png      — Summary tables
+    7. spectra_ke_*.png         — Kinetic energy spectra for target leads
+    8. lapse_rate_*.png         — Lapse rate distributions by region
 
 Usage:
     physmetrics-plot --results-dir ./results --outdir ./plots
@@ -31,8 +33,10 @@ from pathlib import Path
 from typing import Dict, List, Optional, Union
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import seaborn as sns
+from scipy.stats import wasserstein_distance
 
 
 # ============================================================================
@@ -55,6 +59,12 @@ DEFAULT_PALETTE: List[str] = [
     "#e67e22", "#16a085", "#f39c12", "#c0392b",
 ]
 
+MODELS = ["hres", "pangu", "graphcast", "neuralgcm", "fuxi", "aurora", "ifs_ens", "Model"]
+NICE = {
+    "hres": "HRES", "pangu": "Pangu", "graphcast": "GraphCast",
+    "neuralgcm": "NeuralGCM", "fuxi": "FuXi", "aurora": "Aurora",
+    "ifs_ens": "IFS Ens", "Model": "Model",
+}
 
 @dataclass
 class PlotterConfig:
@@ -68,7 +78,6 @@ class PlotterConfig:
         dpi: Figure resolution DPI for image export.
         file_format: Output image format ('png', 'pdf', 'svg').
     """
-
     results_dir: Path
     outdir: Path
     reference_label: str = "auto"
@@ -155,12 +164,88 @@ def get_model_baselines(
     """
     baselines = {}
     for model, df in summaries.items():
-        df_metric = df[df["metric_name"] == metric_name]
-        if not df_metric.empty and "ref_value" in df_metric.columns:
-            ref_val = df_metric["ref_value"].dropna()
-            if not ref_val.empty:
-                baselines[model] = float(ref_val.iloc[0])
+        metric_col = next((c for c in ["metric_name", "metric", "variable", "name"] if c in df.columns), None)
+        if metric_col:
+            df_metric = df[df[metric_col] == metric_name]
+            if not df_metric.empty:
+                ref_col = next((c for c in ["ref_value", "mean_ref"] if c in df_metric.columns), None)
+                if ref_col:
+                    vals = pd.to_numeric(df_metric[ref_col], errors="coerce")
+                    if vals.notna().any():
+                        baselines[model] = float(vals.mean())
     return baselines
+
+
+def get_value(df: pd.DataFrame, metric: str, is_ref: bool = False) -> float:
+    """Extract a mean metric value from a dataframe."""
+    metric_col = next((c for c in ["metric_name", "metric", "variable", "name"] if c in df.columns), None)
+    if not metric_col: return np.nan
+    sub = df[df[metric_col] == metric]
+    if sub.empty: return np.nan
+    val_col = next((c for c in (["ref_value", "mean_ref"] if is_ref else ["model_value", "mean_value", "mean_model", "value", "mean", "score"]) if c in sub.columns), None)
+    if not val_col: return np.nan
+    val = sub[val_col].astype(float).mean()
+    return float(val) if pd.notna(val) else np.nan
+
+
+def fmt(val: float, metric: str) -> str:
+    """Format a metric value for the summary table."""
+    if np.isnan(val): return "—"
+    if "drift" in metric: return f"{val:+.4f}"
+    if "rmse" in metric: return f"{val:.2f}"
+    if "resolution" in metric: return f"{val:.1f}"
+    if "wasserstein" in metric: return f"{val:.4f}"
+    return f"{val:.4f}"
+
+
+def _read_hardcoded_rmse(path: Path) -> dict[str, float]:
+    out: dict[str, float] = {}
+    if not path.exists():
+        return out
+    for raw in path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"): continue
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) != 2: continue
+        try: out[parts[0]] = float(parts[1])
+        except ValueError: continue
+    return out
+
+
+def _metric_mean(df: pd.DataFrame, metric: str, prefer_ref: bool = True) -> float:
+    metric_col = next((c for c in ["metric_name", "metric", "variable", "name"] if c in df.columns), None)
+    if metric_col is None: return np.nan
+    sub = df[df[metric_col] == metric]
+    if sub.empty: return np.nan
+    pref_cols = ["ref_value", "mean_ref"] if prefer_ref else ["model_value", "mean_value", "mean_model", "value", "mean", "score"]
+    fallback_cols = ["model_value", "mean_value", "mean_model", "value", "mean", "score"] if prefer_ref else ["ref_value", "mean_ref"]
+    for col in pref_cols + fallback_cols:
+        if col in sub.columns:
+            vals = pd.to_numeric(sub[col], errors="coerce").dropna()
+            if not vals.empty: return float(vals.mean())
+    return np.nan
+
+
+def get_or_compute_hardcoded_rmse(results_dir: Path, summaries: dict[str, pd.DataFrame]) -> dict[str, float]:
+    """Retrieve or compute hardcoded RMSE baselines."""
+    target_file = results_dir / "ref_rmse.txt"
+    candidate_files = [target_file, results_dir / "era5_rmse.txt", results_dir / "ifs_rmse.txt", results_dir / "hres_rmse.txt"]
+    for f in candidate_files:
+        vals = _read_hardcoded_rmse(f)
+        if "hydrostatic_rmse" in vals and "geostrophic_rmse" in vals:
+            return vals
+    source = summaries.get("era5") or summaries.get("hres") or summaries.get("ifs_ens") or summaries.get("pangu")
+    if source is None: return {}
+    out = {
+        "hydrostatic_rmse": _metric_mean(source, "hydrostatic_rmse", prefer_ref=True),
+        "geostrophic_rmse": _metric_mean(source, "geostrophic_rmse", prefer_ref=True),
+    }
+    if np.isnan(out["hydrostatic_rmse"]): out["hydrostatic_rmse"] = _metric_mean(source, "hydrostatic_rmse", prefer_ref=False)
+    if np.isnan(out["geostrophic_rmse"]): out["geostrophic_rmse"] = _metric_mean(source, "geostrophic_rmse", prefer_ref=False)
+    if np.isnan(out["hydrostatic_rmse"]) or np.isnan(out["geostrophic_rmse"]):
+        return {k: v for k, v in out.items() if not np.isnan(v)}
+    target_file.write_text("hydrostatic_rmse," + f"{out['hydrostatic_rmse']:.12f}\ngeostrophic_rmse," + f"{out['geostrophic_rmse']:.12f}\n")
+    return out
 
 
 # ============================================================================
@@ -183,6 +268,7 @@ class PhysicsPlotter:
         self.config = config
         self.config.outdir.mkdir(parents=True, exist_ok=True)
         sns.set_theme(style=self.config.style, font_scale=1.1)
+        self.summaries = load_summaries(self.config.results_dir)
 
     def _get_color(self, label: str, index: int = 0) -> str:
         """Get consistent color for model or reference label.
@@ -207,6 +293,7 @@ class PhysicsPlotter:
         ylabel: str,
         filename: str,
         ref_val: Optional[float] = None,
+        is_conservation: bool = False,
     ) -> Path:
         """Render and save a time series plot with ensemble shading if available.
 
@@ -229,12 +316,50 @@ class PhysicsPlotter:
             models = ["Model"]
             df_ts["model"] = "Model"
 
+        bases = get_model_baselines(self.summaries, metric_col) if "rmse" in metric_col else {}
+        hardcoded_rmse = get_or_compute_hardcoded_rmse(self.config.results_dir, self.summaries) if "rmse" in metric_col else {}
+
         for idx, model_name in enumerate(models):
-            df_m = df_ts[df_ts["model"] == model_name]
+            df_m = df_ts[df_ts["model"] == model_name].copy()
             color = self._get_color(model_name, idx)
+            
+            if is_conservation:
+                rel_df = df_m[["date", "forecast_hour", metric_col]].copy()
+                if "ensemble_member" in df_m.columns:
+                    rel_df["ensemble_member"] = df_m["ensemble_member"]
+                    group_cols = ["date", "ensemble_member"]
+                else:
+                    group_cols = ["date"]
+                    
+                rel_df = rel_df.dropna()
+                if rel_df.empty: continue
+                
+                base = (
+                    rel_df.sort_values("forecast_hour")
+                    .groupby(group_cols, as_index=False)
+                    .first()[group_cols + [metric_col]]
+                    .rename(columns={metric_col: "base_val"})
+                )
+                rel_df = rel_df.merge(base, on=group_cols, how="left")
+                rel_df = rel_df[rel_df["base_val"].abs() > 0]
+                if rel_df.empty: continue
+                
+                df_m["plot_val"] = (rel_df[metric_col] - rel_df["base_val"]) / rel_df["base_val"] * 100.0
+                plot_col = "plot_val"
+            else:
+                if "rmse" in metric_col:
+                    base_val = bases.get(model_name, bases.get("hres", bases.get("era5", 0.0)))
+                    if (base_val == 0.0 or np.isnan(base_val)) and metric_col in hardcoded_rmse:
+                        base_val = hardcoded_rmse[metric_col]
+                    if np.isnan(base_val):
+                        base_val = 0.0
+                    df_m["plot_val"] = pd.to_numeric(df_m[metric_col], errors="coerce") - base_val
+                    plot_col = "plot_val"
+                else:
+                    plot_col = metric_col
 
             if "ensemble_member" in df_m.columns and df_m["ensemble_member"].nunique() > 1:
-                stats = df_m.groupby("forecast_hour")[metric_col].agg(
+                stats = df_m.groupby("forecast_hour")[plot_col].agg(
                     ["mean", "std"]
                 ).reset_index()
                 ax.plot(
@@ -253,10 +378,10 @@ class PhysicsPlotter:
                     label=f"{model_name} (±1 std)",
                 )
             else:
-                stats = df_m.groupby("forecast_hour")[metric_col].mean().reset_index()
+                stats = df_m.groupby("forecast_hour")[plot_col].mean().reset_index()
                 ax.plot(
                     stats["forecast_hour"],
-                    stats[metric_col],
+                    stats[plot_col],
                     label=model_name,
                     color=color,
                     linewidth=2,
@@ -275,6 +400,320 @@ class PhysicsPlotter:
         plt.savefig(out_path, dpi=self.config.dpi)
         plt.close(fig)
         return out_path
+
+    def plot_summary_tables(self, leads=[12, 120, 240]) -> List[Path]:
+        """Generate and save summary tables comparing models across lead times."""
+        generated = []
+        hardcoded_rmse = get_or_compute_hardcoded_rmse(self.config.results_dir, self.summaries)
+        
+        models_to_plot = list(self.summaries.keys())
+        if not models_to_plot:
+            return generated
+
+        groups = {
+            "Conservation_Variability": [
+                ("dry_mass_drift_pct_per_day", "Dry Mass Drift →0 [%/day]"),
+                ("water_mass_drift_pct_per_day", "Water Mass Drift →0 [%/day]"),
+                ("total_energy_drift_pct_per_day", "Total Energy Drift →0 [%/day]"),
+            ],
+            "Spectral": [
+                ("effective_resolution_km", "Eff. Resolution ↓111.5 [km]"),
+                ("spectral_residual", "Spec. Residual ↓0"),
+                ("spectral_divergence", "Spec. Divergence ↓0"),
+            ],
+            "Balance": [
+                ("geostrophic_rmse", "Geostrophic RMSE Δ →0 [m/s]"),
+                ("hydrostatic_rmse", "Hydrostatic RMSE Δ →0 [m²/s²]"),
+                ("lapse_rate_wasserstein", "Mean Lapse Rate W-Dist ↓0"),
+            ]
+        }
+        
+        header_color = np.array([0.9, 0.9, 0.9])
+        red = np.array([1.0, 0.75, 0.75])
+        white = np.array([1.0, 1.0, 1.0])
+
+        for group_name, metrics_list in groups.items():
+            current_models = [m for m in models_to_plot if m != "fuxi"] if group_name == "Conservation_Variability" else models_to_plot
+            model_labels = [NICE.get(m, m) for m in current_models]
+
+            max_abs = {}
+            for metric, _ in metrics_list:
+                vals = []
+                for m in current_models:
+                    if m in self.summaries:
+                        df = self.summaries[m]
+                        for lead in leads:
+                            lead_col = next((c for c in ["lead_hours", "lead_time_hours", "lead_time", "forecast_hour"] if c in df.columns), None)
+                            df_lt = df[df[lead_col] == lead] if lead_col else df
+                            if df_lt.empty and lead_col:
+                                avail = sorted(df[lead_col].dropna().unique())
+                                if avail: df_lt = df[df[lead_col] == min(avail, key=lambda x: abs(x - lead))]
+                            if not df_lt.empty:
+                                if metric == "lapse_rate_wasserstein":
+                                    vs = [get_value(df_lt, k) for k in ["lapse_rate_w1_nh_mid", "lapse_rate_w1_sh_mid", "lapse_rate_w1_tropics"]]
+                                    val = np.mean([v for v in vs if not np.isnan(v)]) if any(not np.isnan(v) for v in vs) else np.nan
+                                else:
+                                    val = get_value(df_lt, metric)
+                                if metric in ["hydrostatic_rmse", "geostrophic_rmse"] and not np.isnan(val):
+                                    ref_val = get_value(df_lt, metric, is_ref=True)
+                                    if np.isnan(ref_val) and metric in hardcoded_rmse:
+                                        ref_val = hardcoded_rmse[metric]
+                                    if not np.isnan(ref_val):
+                                        val -= ref_val
+                                if not np.isnan(val): vals.append(val)
+                max_abs[metric] = max([abs(v) for v in vals]) if vals else 1.0
+                if max_abs[metric] == 0: max_abs[metric] = 1.0
+
+            cell_texts = [["Metric", "Lead Time"] + model_labels]
+            cell_colors = [[header_color] * len(cell_texts[0])]
+                
+            for metric, m_label in metrics_list:
+                for l_idx, lead in enumerate(leads):
+                    text_label = m_label if l_idx == len(leads)//2 else ""
+                    row_t = [text_label, f"{lead}h"]
+                    row_c = [white.copy(), white.copy()]
+
+                    for m in current_models:
+                        val = np.nan
+                        suffix = ""
+                        if m in self.summaries:
+                            df = self.summaries[m]
+                            lead_col = next((c for c in ["lead_hours", "lead_time_hours", "lead_time", "forecast_hour"] if c in df.columns), None)
+                            if lead_col:
+                                df_lt = df[df[lead_col] == lead]
+                                if df_lt.empty:
+                                    avail = sorted(df[lead_col].dropna().unique())
+                                    if avail:
+                                        nearest = min(avail, key=lambda x: abs(x - lead))
+                                        df_lt = df[df[lead_col] == nearest]
+                                        if metric == "lapse_rate_wasserstein":
+                                            vs = [get_value(df_lt, k) for k in ["lapse_rate_w1_nh_mid", "lapse_rate_w1_sh_mid", "lapse_rate_w1_tropics"]]
+                                            val = np.mean([v for v in vs if not np.isnan(v)]) if any(not np.isnan(v) for v in vs) else np.nan
+                                        else:
+                                            val = get_value(df_lt, metric)
+                                        suffix = " *"
+                                else:
+                                    if metric == "lapse_rate_wasserstein":
+                                        vs = [get_value(df_lt, k) for k in ["lapse_rate_w1_nh_mid", "lapse_rate_w1_sh_mid", "lapse_rate_w1_tropics"]]
+                                        val = np.mean([v for v in vs if not np.isnan(v)]) if any(not np.isnan(v) for v in vs) else np.nan
+                                    else:
+                                        val = get_value(df_lt, metric)
+                                    
+                        if metric in ["hydrostatic_rmse", "geostrophic_rmse"] and not np.isnan(val):
+                            ref_val = get_value(df_lt, metric, is_ref=True)
+                            if np.isnan(ref_val) and metric in hardcoded_rmse:
+                                ref_val = hardcoded_rmse[metric]
+                            if not np.isnan(ref_val):
+                                val -= ref_val
+                                
+                        if np.isnan(val):
+                            row_t.append("—")
+                            row_c.append(white)
+                        else:
+                            row_t.append(fmt(val, metric) + suffix)
+                            if metric == "effective_resolution_km" and m in ["hres", "neuralgcm"]:
+                                row_c.append(white)
+                            else:
+                                intensity = min(abs(val) / max_abs[metric], 1.0) * 0.8
+                                row_c.append(white * (1 - intensity) + red * intensity)
+                        
+                    cell_texts.append(row_t)
+                    cell_colors.append(row_c)
+
+            n_cols = len(cell_texts[0])
+            n_rows = len(cell_texts)
+            fig, ax = plt.subplots(figsize=(max(1.8 * n_cols, 12), max(0.3 * n_rows, 3.0)))
+            ax.axis("off")
+            
+            colWidths = [0.45 if group_name in ["Balance", "Conservation_Variability"] else 0.35, 0.12] + [0.15] * len(current_models)
+            table = ax.table(
+                cellText=cell_texts,
+                cellColours=[[tuple(c) for c in row] for row in cell_colors],
+                colWidths=colWidths, loc="center", cellLoc="center"
+            )
+            table.auto_set_font_size(False)
+            table.set_fontsize(14)
+            table.scale(1.0, 1.6)
+
+            for j in range(n_cols):
+                table[0, j].set_text_props(fontweight="bold")
+                table[0, j].set_facecolor(tuple(header_color))
+
+            row_idx = 1
+            for _ in metrics_list:
+                for r in range(row_idx, row_idx + len(leads)):
+                    if r == row_idx: table[r, 0].visible_edges = 'LRT'
+                    elif r == row_idx + len(leads) - 1: table[r, 0].visible_edges = 'LRB'
+                    else: table[r, 0].visible_edges = 'LR'
+                    table[r, 0].set_text_props(fontweight="bold")
+                row_idx += len(leads)
+
+            out_path = self.config.outdir / f"neurips_table_{group_name.lower()}.{self.config.file_format}"
+            fig.savefig(out_path, dpi=200, bbox_inches="tight")
+            plt.close(fig)
+            generated.append(out_path)
+            
+        return generated
+
+    def plot_spectra(self, leads=[12, 120, 240]) -> List[Path]:
+        """Plot spectra for target lead times."""
+        EARTH_RADIUS_KM = 6371.0
+        generated = []
+        csv_paths = list(self.config.results_dir.glob("spectra_*.csv"))
+        if not csv_paths:
+            print("No spectra_*.csv found.")
+            return generated
+
+        frames = []
+        for path in csv_paths:
+            model = path.stem.replace("spectra_", "").split("_")[0]
+            if "ifs_ens" in path.name: model = "ifs_ens"
+            if model not in MODELS: continue
+            df = pd.read_csv(path)
+            df["model"] = model
+            frames.append(df)
+            
+        if not frames: return generated
+        df_all = pd.concat(frames, ignore_index=True)
+        self.config.outdir.mkdir(exist_ok=True, parents=True)
+        sns.set_theme(style=self.config.style)
+
+        for lt in leads:
+            sub = df_all[(df_all["lead_hours"] == lt) & (df_all["variable"].str.startswith("KE")) & (df_all["wavenumber"] > 0)]
+            if sub.empty: continue
+            
+            fig, ax = plt.subplots(figsize=(10, 5))
+            
+            ref_agg = sub.groupby("wavenumber")["power_ref"].mean().reset_index()
+            if not ref_agg.empty:
+                wl = 2.0 * np.pi * EARTH_RADIUS_KM / ref_agg["wavenumber"].values
+                ax.loglog(wl, ref_agg["power_ref"].values, color="black", linewidth=2, label=self.config.reference_label, zorder=5)
+
+            for model in MODELS:
+                msub = sub[sub["model"] == model]
+                if msub.empty: continue
+                msub_agg = msub.groupby("wavenumber")["power_pred"].mean().reset_index()
+                wl = 2.0 * np.pi * EARTH_RADIUS_KM / msub_agg["wavenumber"].values
+                ax.loglog(wl, msub_agg["power_pred"].values, color=self._get_color(model), linewidth=1.5, label=NICE.get(model, model))
+                
+            ax.set_title(f"KE Spectrum - {lt}h", fontsize=45)
+            ax.set_xlabel("Wavelength (km)", fontsize=35)
+            ax.set_ylabel("Kinetic Energy", fontsize=35)
+            ax.set_xlim(40000, 100) 
+            
+            if lt == 240:
+                ax.legend(fontsize=24, bbox_to_anchor=(1.05, 1), loc="upper left")
+                
+            ax.tick_params(axis='both', which='major', labelsize=30)
+            
+            out_file = self.config.outdir / f"spectra_ke_{lt}h.{self.config.file_format}"
+            fig.savefig(out_file, dpi=self.config.dpi, bbox_inches="tight")
+            plt.close(fig)
+            generated.append(out_file)
+            print(f"Saved spectra plot for {lt}h")
+        return generated
+
+    def plot_lapse_rates(self, leads=[12, 120, 240]) -> List[Path]:
+        """Plot lapse rate distributions as line curves for easier model comparison."""
+        generated = []
+        csv_paths = list(self.config.results_dir.glob("lapse_rate_dist_*.csv"))
+        if not csv_paths:
+            print("No lapse_rate_dist_*.csv found.")
+            return generated
+
+        frames = []
+        for path in csv_paths:
+            model = path.stem.replace("lapse_rate_dist_", "").split("_")[0]
+            if "ifs_ens" in path.name: model = "ifs_ens"
+            if model not in MODELS: continue
+            df = pd.read_csv(path)
+            df["model"] = model
+            frames.append(df)
+            
+        if not frames: return generated
+        df_all = pd.concat(frames, ignore_index=True)
+        self.config.outdir.mkdir(exist_ok=True, parents=True)
+        sns.set_theme(style=self.config.style)
+
+        regions = df_all["region"].unique()
+        
+        for region in regions:
+            fig, axes = plt.subplots(1, len(leads), figsize=(18, 5), sharey=True)
+            if len(leads) == 1: axes = [axes]
+            legend_handles = None
+            legend_labels = None
+            
+            for ax, lt in zip(axes, leads):
+                sub = df_all[(df_all["lead_hours"] == lt) & (df_all["region"] == region)]
+                if sub.empty: continue
+                y_max = 0.0
+                
+                b_unique = np.sort(sub["bin_edge_lower"].unique())
+                width = float(np.median(np.diff(b_unique))) if len(b_unique) > 1 else 0.5
+
+                ref_agg = (
+                    sub.groupby("bin_edge_lower", as_index=False)["freq_ref"]
+                    .mean()
+                    .sort_values("bin_edge_lower")
+                )
+                if not ref_agg.empty:
+                    x_ref = ref_agg["bin_edge_lower"].to_numpy() + 0.5 * width
+                    y_ref = ref_agg["freq_ref"].to_numpy()
+                    if y_ref.size:
+                        y_max = max(y_max, float(np.nanmax(y_ref)))
+                    ax.plot(x_ref, y_ref, color="black", linewidth=2.4, label=self.config.reference_label, zorder=10)
+
+                for i, model in enumerate(MODELS):
+                    msub = sub[sub["model"] == model]
+                    if msub.empty: continue
+                    m_agg = (
+                        msub.groupby("bin_edge_lower", as_index=False)["freq_pred"]
+                        .mean()
+                        .sort_values("bin_edge_lower")
+                    )
+                    x = m_agg["bin_edge_lower"].to_numpy() + 0.5 * width
+                    y = m_agg["freq_pred"].to_numpy()
+                    if y.size:
+                        y_max = max(y_max, float(np.nanmax(y)))
+                    ax.plot(
+                        x,
+                        y,
+                        color=self._get_color(model),
+                        linewidth=1.7,
+                        alpha=0.95,
+                        label=NICE.get(model, model),
+                        zorder=3 + i,
+                    )
+                
+                non_zero = sub[(sub["freq_ref"].fillna(0) > 1e-5) | (sub["freq_pred"].fillna(0) > 1e-5)]
+                if not non_zero.empty:
+                    lower_bound = non_zero["bin_edge_lower"].min()
+                    upper_bound = non_zero["bin_edge_lower"].max()
+                    pad = (upper_bound - lower_bound) * 0.05
+                    ax.set_xlim(lower_bound - pad, upper_bound + pad)
+
+                if y_max > 0:
+                    ax.set_ylim(0, y_max * 1.20)
+                else:
+                    ax.set_ylim(bottom=0)
+                ax.set_title(f"{pretty_region_name(region)} - {lt}h", fontsize=45)
+                ax.set_xlabel("Lapse Rate (K/km)", fontsize=35)
+                if ax == axes[0]: ax.set_ylabel("Density", fontsize=35)
+
+                ax.tick_params(axis='both', which='major', labelsize=30)
+
+                if legend_handles is None:
+                    legend_handles, legend_labels = ax.get_legend_handles_labels()
+                
+            if legend_handles:
+                axes[-1].legend(legend_handles, legend_labels, bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=28)
+            fig.tight_layout()
+            out_file = self.config.outdir / f"lapse_rate_{region}.{self.config.file_format}"
+            fig.savefig(out_file, dpi=self.config.dpi)
+            plt.close(fig)
+            generated.append(out_file)
+            print(f"Saved lapse rate plot for {region}")
+        return generated
 
     def generate_all(self) -> List[Path]:
         """Load CSV datasets and generate all diagnostic figures.
@@ -299,8 +738,9 @@ class PhysicsPlotter:
                     df_ts,
                     "dry_mass_Eg",
                     "Global Dry Air Mass Drift",
-                    "Dry Mass (Eg)",
+                    "Relative Change (%)",
                     "ts_dry_mass_Eg",
+                    is_conservation=True
                 )
                 generated_plots.append(p)
 
@@ -309,8 +749,9 @@ class PhysicsPlotter:
                     df_ts,
                     "water_mass_kg",
                     "Global Water Mass Drift",
-                    "Water Mass (kg)",
+                    "Relative Change (%)",
                     "ts_water_mass_kg",
+                    is_conservation=True
                 )
                 generated_plots.append(p)
 
@@ -319,8 +760,9 @@ class PhysicsPlotter:
                     df_ts,
                     "total_energy_J",
                     "Global Total Atmospheric Energy Drift",
-                    "Total Energy (J)",
+                    "Relative Change (%)",
                     "ts_total_energy_J",
+                    is_conservation=True
                 )
                 generated_plots.append(p)
 
@@ -328,8 +770,8 @@ class PhysicsPlotter:
                 p = self.plot_time_series(
                     df_ts,
                     "hydrostatic_rmse",
-                    "Hydrostatic Balance Error RMSE",
-                    "RMSE (m²/s²)",
+                    "Hydrostatic Balance Error RMSE Difference",
+                    "RMSE Difference (m²/s²)",
                     "ts_hydrostatic_rmse",
                 )
                 generated_plots.append(p)
@@ -338,11 +780,18 @@ class PhysicsPlotter:
                 p = self.plot_time_series(
                     df_ts,
                     "geostrophic_rmse",
-                    "Geostrophic Wind Balance Error RMSE",
-                    "RMSE (m/s)",
+                    "Geostrophic Wind Balance Error RMSE Difference",
+                    "RMSE Difference (m/s)",
                     "ts_geostrophic_rmse",
                 )
                 generated_plots.append(p)
+
+        print("Generating summary tables...")
+        generated_plots.extend(self.plot_summary_tables(leads=[12, 120, 240]))
+        print("Generating spectra plots...")
+        generated_plots.extend(self.plot_spectra(leads=[12, 120, 240]))
+        print("Generating lapse rate distributions...")
+        generated_plots.extend(self.plot_lapse_rates(leads=[12, 120, 240]))
 
         return generated_plots
 
@@ -404,3 +853,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
