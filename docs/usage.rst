@@ -36,10 +36,12 @@ CLI Example:
 .. code-block:: bash
 
    physmetrics-run \
-     --prediction-zarr gs://weatherbench2/datasets/aurora/2022-1440x721.zarr \
-     --model aurora \
-     --dates 2020-01-01 2020-01-02 \
-     --output-dir ./results
+      --model pangu \
+      --prediction-zarr gs://weatherbench2/datasets/pangu/2018-2022_0012_0p25.zarr \
+      --ref-zarr gs://weatherbench2/datasets/era5/1959-2023_01_10-wb13-6h-1440x721_with_derived_variables.zarr \
+      --dates 2020-01-01 2020-01-02 \
+      --workers 4 \
+      --output-dir ./results
 
 Generating Visualizations (physmetrics-plot)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -66,9 +68,9 @@ Use ``EvaluationConfig`` and ``EvaluationPipeline`` to run evaluation workflows 
    # 1. Define configuration settings
    config = EvaluationConfig(
        dates=["2020-01-01", "2020-01-02"],
-       prediction_zarr="gs://weatherbench2/datasets/aurora/2022-1440x721.zarr",
-       model_name="aurora",
-       output_csv=Path("./results/physics_evaluation_aurora_2020.csv"),
+       prediction_zarr=" gs://weatherbench2/datasets/pangu/2018-2022_0012_0p25.zarr",
+       model_name="pangu",
+       output_csv=Path("./results/physics_evaluation_pangu_2020.csv"),
        workers=4,
    )
 
@@ -106,10 +108,11 @@ Use ``PlotterConfig`` and ``PhysicsPlotter`` to generate figure plots programmat
 
 Generated Figures
 -----------------
-
-* ``ts_dry_mass_Eg.png``: Dry air mass relative drift timeseries.
-* ``ts_water_mass_kg.png``: Atmospheric water mass relative drift timeseries.
-* ``ts_total_energy_J.png``: Total atmospheric energy relative drift timeseries.
-* ``ts_hydrostatic_rmse.png``: Hydrostatic balance RMSE timeseries.
-* ``ts_geostrophic_rmse.png``: Geostrophic balance RMSE timeseries.
-* ``spectra_ke_*.png``: Kinetic energy spectra at lead times.
+* ``ts_dry_mass_Eg.png``: Global dry air mass drift timeseries
+* ``ts_water_mass_kg.png``: Global water mass drift timeseries
+* ``ts_total_energy_J.png``: Global total energy drift timeseries
+* ``ts_hydrostatic_rmse.png``: Hydrostatic balance error timeseries
+* ``ts_geostrophic_rmse.png``: Geostrophic balance error timeseries
+* ``neurips_table_*.png``: Summary tables
+* ``spectra_ke_*.png``: Kinetic energy spectra for target leads
+* ``lapse_rate_*.png``: Lapse rate distributions by region
