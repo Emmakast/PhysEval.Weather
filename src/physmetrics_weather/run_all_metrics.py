@@ -829,13 +829,67 @@ def _evaluate_one(
                 else:
                     ds_model_m = ds_model_t
 
-                # Environmental Lapse Rate Wasserstein Distance
                 try:
                     lr_results = compute_lapse_rate_wasserstein(
                         ds_model_m, ds_ref_aligned, area_model
                     )
                     for band_key, w1_val in lr_results.items():
                         _append_summary(band_key, w1_val, None, ens_member=m)
+                    
+                    # --- Lapse Rate Distribution ---
+                    # Calculate Gamma explicitly
+                    t_name_p = _find_var(ds_model_m, T_NAMES)
+                    phi_name_p = _find_var(ds_model_m, PHI_NAMES)
+                    t_name_r = _find_var(ds_ref_aligned, T_NAMES)
+                    phi_name_r = _find_var(ds_ref_aligned, PHI_NAMES)
+                    
+                    ld_p = _detect_level_dim(ds_model_m)
+                    ld_r = _detect_level_dim(ds_ref_aligned)
+                    
+                    def _get_gamma(ds, t_var, phi_var, ld, p_top=500.0, p_bot=850.0):
+                        levels = ds[ld].values
+                        idx_top = int(np.abs(levels - p_top).argmin())
+                        idx_bot = int(np.abs(levels - p_bot).argmin())
+                        t_top = ds[t_var].isel({ld: idx_top})
+                        t_bot = ds[t_var].isel({ld: idx_bot})
+                        phi_top = ds[phi_var].isel({ld: idx_top})
+                        phi_bot = ds[phi_var].isel({ld: idx_bot})
+                        return -9.80665 * (t_top - t_bot) / (phi_top - phi_bot) * 1000.0
+
+                    gamma_pred = _get_gamma(ds_model_m, t_name_p, phi_name_p, ld_p)
+                    gamma_ref = _get_gamma(ds_ref_aligned, t_name_r, phi_name_r, ld_r)
+
+                    # Define region masks
+                    lat_p = ds_model_m.latitude
+                    regions = {
+                        "tropics": (lat_p >= -30) & (lat_p <= 30),
+                        "nh_mid": (lat_p > 30) & (lat_p <= 60),
+                        "sh_mid": (lat_p >= -60) & (lat_p < -30)
+                    }
+
+                    bins = np.linspace(-15, 15, 61)
+
+                    for band_key, mask in regions.items():
+                        g_pred_vals = gamma_pred.where(mask, drop=True).values.ravel()
+                        g_ref_vals = gamma_ref.where(mask, drop=True).values.ravel()
+                        g_pred_vals = g_pred_vals[~np.isnan(g_pred_vals)]
+                        g_ref_vals = g_ref_vals[~np.isnan(g_ref_vals)]
+
+                        if len(g_pred_vals) > 0 and len(g_ref_vals) > 0:
+                            hist_pred, _ = np.histogram(g_pred_vals, bins=bins, density=True)
+                            hist_ref, _ = np.histogram(g_ref_vals, bins=bins, density=True)
+                            
+                            for bi, b_val in enumerate(bins[:-1]):
+                                lr_dist_rows.append({
+                                    "date": date_str,
+                                    "lead_hours": lead_hours,
+                                    "region": band_key,
+                                    "bin_edge_lower": float(b_val),
+                                    "freq_pred": float(hist_pred[bi]),
+                                    "freq_ref": float(hist_ref[bi]),
+                                    "ensemble_member": m,
+                                })
+                        
                 except (ValueError, KeyError, AttributeError) as exc:
                     _log(f"    [{counter}] Lapse rate evaluation failed: {exc}")
 
@@ -1066,6 +1120,16 @@ class EvaluationPipeline:
             if self.config.verbose:
                 print(f"  ✓ Spectra saved → {spectra_csv} ({len(df_spec)} rows)")
 
+        if all_lr_dist_rows:
+            year_str = self.config.dates[0][:4] if self.config.dates else "unknown"
+            lr_dist_csv = (
+                self.config.output_csv.parent / f"lapse_rate_dist_{self.config.model_name}_{year_str}.csv"
+            )
+            df_lr = pd.DataFrame(all_lr_dist_rows)
+            df_lr.to_csv(lr_dist_csv, index=False)
+            if self.config.verbose:
+                print(f"  ✓ Lapse rate dists saved → {lr_dist_csv} ({len(df_lr)} rows)")
+
         return df
 
 
@@ -1226,3 +1290,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
