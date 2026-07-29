@@ -1,7 +1,10 @@
 Installation Guide
 ==================
 
-This guide describes how to install ``physmetrics-weather`` using ``pip``, ``uv``, or directly from source.
+This guide describes how to install ``physmetrics-weather`` using standard ``pip`` or ``uv``.
+
+.. note::
+   ``physmetrics-weather`` uses modern ``pyproject.toml`` configuration (PEP 517/518 standard). ``pip`` automatically reads dependencies directly from ``pyproject.toml`` without requiring a ``requirements.txt`` file.
 
 Requirements
 ------------
@@ -9,8 +12,67 @@ Requirements
 * **Python**: ``>= 3.10`` (supports up to Python ``3.14``)
 * **Key Dependencies**: ``numpy``, ``pandas``, ``xarray``, ``dask``, ``scipy``, ``matplotlib``, ``seaborn``, ``zarr``, ``gcsfs``, ``pyshtools``
 
-Installing via PyPI (pip)
--------------------------
+Option 1: Using uv (Recommended / Preferred Method)
+---------------------------------------------------
+
+`uv <https://github.com/astral-sh/uv>`_ is the recommended, high-performance Python package installer and resolution tool.
+
+1. Clone the repository and sync environment dependencies:
+
+.. code-block:: bash
+
+   git clone https://github.com/Emmakast/PhysMetrics.Weather.git
+   cd PhysMetrics.Weather
+   uv sync --extra dev --extra docs
+
+2. Activate the virtual environment:
+
+.. code-block:: bash
+
+   source .venv/bin/activate   # Linux / macOS
+   # .venv\Scripts\activate    # Windows
+
+Option 2: Installing via Standard pip (Local Clone / Source)
+------------------------------------------------------------
+
+1. Clone the repository:
+
+.. code-block:: bash
+
+   git clone https://github.com/Emmakast/PhysMetrics.Weather.git
+   cd PhysMetrics.Weather
+
+2. Create and activate a virtual environment (recommended):
+
+.. code-block:: bash
+
+   python3 -m venv .venv
+   source .venv/bin/activate   # Linux / macOS
+   # .venv\Scripts\activate    # Windows
+
+3. Install the package in editable mode:
+
+.. code-block:: bash
+
+   pip install -e .
+
+To install optional development and documentation dependencies:
+
+.. code-block:: bash
+
+   pip install -e ".[dev,docs]"
+
+Option 3: Installing Directly from GitHub via pip
+-------------------------------------------------
+
+If you do not need a local git checkout, install directly using ``pip``:
+
+.. code-block:: bash
+
+   pip install git+https://github.com/Emmakast/PhysMetrics.Weather.git
+
+Option 4: Installing via PyPI (pip)
+-----------------------------------
 
 Once published on PyPI, install the latest release using ``pip``:
 
@@ -18,43 +80,3 @@ Once published on PyPI, install the latest release using ``pip``:
 
    pip install physmetrics-weather
 
-To install with development and documentation tools:
-
-.. code-block:: bash
-
-   pip install "physmetrics-weather[dev,docs]"
-
-Installing via uv
------------------
-
-`uv <https://github.com/astral-sh/uv>`_ is a fast Python package installer and resolution tool.
-
-To install ``physmetrics-weather`` into your virtual environment with ``uv``:
-
-.. code-block:: bash
-
-   uv pip install physmetrics-weather
-
-Or add it to your project dependencies:
-
-.. code-block:: bash
-
-   uv add physmetrics-weather
-
-Installing from Source
-----------------------
-
-Clone the repository and install the package in editable mode:
-
-.. code-block:: bash
-
-   git clone https://github.com/Emmakast/PhysMetrics.Weather.git
-   cd PhysMetrics.Weather
-   pip install -e .
-
-Using ``uv`` for local development:
-
-.. code-block:: bash
-
-   uv sync --extra dev --extra docs
-   uv run pytest

@@ -31,16 +31,18 @@ It computes diagnostic physical metrics against ERA5 or IFS HRES reference datas
 
 ## Installation
 
-The package supports Python `>= 3.10` up to `3.14`. You can manage dependencies using [uv](https://docs.astral.sh/uv/) or standard `pip`.
+The package supports Python `>= 3.10` up to `3.14`. You can manage dependencies using [`uv`](https://docs.astral.sh/uv/) (Recommended) or standard `pip`.
 
-### Using `uv` (Recommended)
+### 1. Using `uv` (Recommended / Preferred Method)
+
+[`uv`](https://docs.astral.sh/uv/) is the recommended, high-performance package and environment manager for this project:
 
 ```bash
 # 1. Clone the repository
 git clone https://github.com/Emmakast/PhysMetrics.Weather.git
 cd PhysMetrics.Weather
 
-# 2. Sync dependencies and create environment
+# 2. Sync dependencies and create virtual environment
 uv sync --extra dev --extra docs
 
 # 3. Activate the virtual environment
@@ -50,10 +52,31 @@ source .venv/bin/activate   # Linux / macOS
 
 > **Note on `uv` filesystem warnings**: If your working directory is on a different disk partition/mount than your home directory (where `uv` stores cached wheels), `uv` automatically falls back to full copies and may display `warning: Failed to hardlink files`. This is completely safe. To suppress the warning, run `export UV_LINK_MODE=copy` or use `uv sync --link-mode=copy`.
 
-### Using standard `pip`
+### 2. Using standard `pip` (Local Clone / Source)
+
+> **Note**: `physmetrics-weather` uses `pyproject.toml` (PEP 517/518 standard). `pip` reads dependencies directly from `pyproject.toml`, so no `requirements.txt` file is needed.
 
 ```bash
+# 1. Clone the repository
+git clone https://github.com/Emmakast/PhysMetrics.Weather.git
+cd PhysMetrics.Weather
+
+# 2. Create and activate a virtual environment (recommended)
+python3 -m venv .venv
+source .venv/bin/activate   # Linux / macOS
+# .venv\Scripts\activate    # Windows
+
+# 3. Install the package in editable mode
 pip install -e .
+
+# Optional: Install with development & documentation tools
+pip install -e ".[dev,docs]"
+```
+
+### 3. Direct `pip` Install from GitHub (Without Cloning)
+
+```bash
+pip install git+https://github.com/Emmakast/PhysMetrics.Weather.git
 ```
 
 After installation, the CLI commands `physmetrics-run` and `physmetrics-plot` are available on your system `PATH`:
@@ -234,10 +257,14 @@ Full Sphinx documentation is available in the `docs/` directory.
 ### Build and View Locally
 
 ```bash
-# Build Sphinx HTML documentation
-uv run sphinx-build -b html docs docs/_build/html
+# 1. Install documentation dependencies (if not already installed)
+pip install -e ".[docs]"
 
-# Serve locally at http://localhost:8000
+# 2. Build Sphinx HTML documentation
+sphinx-build -b html docs docs/_build/html
+# (Or using uv: uv run sphinx-build -b html docs docs/_build/html)
+
+# 3. Serve locally at http://localhost:8000
 python3 -m http.server 8000 --directory docs/_build/html
 ```
 
@@ -248,8 +275,12 @@ python3 -m http.server 8000 --directory docs/_build/html
 Run the comprehensive unit test suite:
 
 ```bash
+# Install development dependencies (if not already installed)
+pip install -e ".[dev]"
+
 # Run pytest test suite
-uv run pytest
+pytest
+# (Or using uv: uv run pytest)
 
 # Verify wheel and source distribution build
 uv build
