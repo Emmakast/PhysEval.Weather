@@ -21,7 +21,7 @@ Evaluating Single Slices via Python API
    )
 
    # Load forecast snapshot from WeatherBench 2
-   ds_model = xr.open_zarr("gs://weatherbench2/datasets/aurora/2022-1440x721.zarr", storage_options={"token": "anon"})
+   ds_model = xr.open_zarr("gs://weatherbench2/datasets/pangu/2018-2022_0012_0p25.zarr", storage_options={"token": "anon"})
    ds_ref = xr.open_zarr("gs://weatherbench2/datasets/era5/1959-2023_01_10-wb13-6h-1440x721_with_derived_variables.zarr", storage_options={"token": "anon"})
 
    snapshot = ds_model.sel(time="2020-01-01T00:00:00").isel(prediction_timedelta=2)
@@ -101,7 +101,8 @@ CLI Batch Running
 .. code-block:: bash
 
    physmetrics-run \
-     --prediction-zarr /path/to/model_forecast.zarr \
-     --model my_model \
-     --dates 2020-01-01 2020-01-02 \
-     --output-dir ./results
+      --model my_model \
+      --prediction-zarr /path/to/my_model_forecasts.zarr \
+      --ref-zarr /path/to/my_model_reference.zarr \
+      --dates 2020-01-01 2020-01-02 \
+      --output-dir ./results
