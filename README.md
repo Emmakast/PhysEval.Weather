@@ -90,6 +90,7 @@ Stream data directly from public WeatherBench 2 Google Cloud Storage buckets:
 physmetrics-run \
   --model pangu \
   --prediction-zarr gs://weatherbench2/datasets/pangu/2018-2022_0012_0p25.zarr \
+  --ref-zarr gs://weatherbench2/datasets/era5/1959-2023_01_10-wb13-6h-1440x721_with_derived_variables.zarr \
   --dates 2020-01-01 2020-01-02 \
   --workers 4 \
   --output-dir ./results
@@ -103,6 +104,7 @@ Point `--prediction-zarr` at any local or cloud Zarr store:
 physmetrics-run \
   --model my_model \
   --prediction-zarr /path/to/my_model_forecasts.zarr \
+  --ref-zarr /path/to/my_model_reference.zarr \
   --dates 2020-01-01 2020-01-02 \
   --output-dir ./results
 ```
@@ -195,15 +197,34 @@ plots = plotter.generate_all()
 
 ---
 
-## Output CSV Format
+## Output CSV Formats
 
-`physmetrics-run` outputs long-format CSV files with the following structure:
+`physmetrics-run` generates four types of CSV files in the output directory:
 
+### 1. `physics_evaluation_*.csv` (Main summary metrics)
 ```csv
 date,lead_time_hours,metric_name,model_value,ref_value,n_levels,sp_method,ensemble_member
 2020-01-01,12,hydrostatic_rmse,1.23,0.98,13,direct_sp,0
 2020-01-01,12,geostrophic_rmse,2.45,2.10,13,direct_sp,0
 2020-01-01,120,dry_mass_drift_pct_per_day,-0.002,,13,direct_sp,0
+```
+
+### 2. `time_series_*.csv` (Conservation and balance tracking)
+```csv
+date,forecast_hour,dry_mass_Eg,water_mass_kg,total_energy_J,hydrostatic_rmse,geostrophic_rmse,sp_method,ensemble_member
+2020-01-01,12.0,5.12e18,1.2e16,4.5e21,1.23,2.45,direct_sp,0
+```
+
+### 3. `spectra_*.csv` (Spherical harmonic spectra power)
+```csv
+date,lead_hours,variable,wavenumber,power_pred,power_ref,ensemble_member
+2020-01-01,12,KE:500,10,450.2,455.1,0
+```
+
+### 4. `lapse_rate_dist_*.csv` (Lapse rate probability distributions)
+```csv
+date,lead_hours,region,bin_edge_lower,freq_pred,freq_ref,ensemble_member
+2020-01-01,12,tropics,-10.5,0.012,0.014,0
 ```
 
 ---
@@ -259,3 +280,4 @@ If you use **PhysMetrics.Weather** in your research, please cite our paper:
 ## License
 
 This project is licensed under the [MIT License](LICENCE).
+
