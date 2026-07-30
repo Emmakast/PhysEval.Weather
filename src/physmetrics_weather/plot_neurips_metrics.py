@@ -481,23 +481,38 @@ class PhysicsPlotter:
                             lead_col = next((c for c in ["lead_hours", "lead_time_hours", "lead_time", "forecast_hour"] if c in df.columns), None)
                             if lead_col:
                                 df_lt = df[df[lead_col] == lead]
-                                if df_lt.empty:
-                                    avail = sorted(df[lead_col].dropna().unique())
-                                    if avail:
-                                        nearest = min(avail, key=lambda x: abs(x - lead))
-                                        df_lt = df[df[lead_col] == nearest]
-                                        if metric == "lapse_rate_wasserstein":
-                                            vs = [get_value(df_lt, k) for k in ["lapse_rate_w1_nh_mid", "lapse_rate_w1_sh_mid", "lapse_rate_w1_tropics"]]
-                                            val = np.mean([v for v in vs if not np.isnan(v)]) if any(not np.isnan(v) for v in vs) else np.nan
-                                        else:
-                                            val = get_value(df_lt, metric)
-                                        suffix = " *"
-                                else:
+                                val = np.nan
+                                if not df_lt.empty:
                                     if metric == "lapse_rate_wasserstein":
                                         vs = [get_value(df_lt, k) for k in ["lapse_rate_w1_nh_mid", "lapse_rate_w1_sh_mid", "lapse_rate_w1_tropics"]]
                                         val = np.mean([v for v in vs if not np.isnan(v)]) if any(not np.isnan(v) for v in vs) else np.nan
                                     else:
                                         val = get_value(df_lt, metric)
+                                        
+                                if np.isnan(val):
+                                    # Fallback: Find nearest lead time where THIS metric is valid
+                                    metric_col = next((c for c in ["metric_name", "metric", "variable", "name"] if c in df.columns), None)
+                                    if metric_col:
+                                        if metric == "lapse_rate_wasserstein":
+                                            df_metric = df[df[metric_col].isin(["lapse_rate_w1_nh_mid", "lapse_rate_w1_sh_mid", "lapse_rate_w1_tropics"])]
+                                        else:
+                                            df_metric = df[df[metric_col] == metric]
+                                            
+                                        # Also drop rows where model_value is NaN
+                                        val_col = next((c for c in ["model_value", "mean_value", "mean_model", "value", "mean", "score"] if c in df_metric.columns), None)
+                                        if val_col:
+                                            df_metric = df_metric.dropna(subset=[val_col])
+                                            
+                                        avail = sorted(df_metric[lead_col].dropna().unique())
+                                        if avail:
+                                            nearest = min(avail, key=lambda x: abs(x - lead))
+                                            df_lt = df_metric[df_metric[lead_col] == nearest]
+                                            if metric == "lapse_rate_wasserstein":
+                                                vs = [get_value(df_lt, k) for k in ["lapse_rate_w1_nh_mid", "lapse_rate_w1_sh_mid", "lapse_rate_w1_tropics"]]
+                                                val = np.mean([v for v in vs if not np.isnan(v)]) if any(not np.isnan(v) for v in vs) else np.nan
+                                            else:
+                                                val = get_value(df_lt, metric)
+                                            suffix = " *"
                                     
                         if metric in ["hydrostatic_rmse", "geostrophic_rmse"] and not np.isnan(val):
                             ref_val = get_value(df_lt, metric, is_ref=True)
@@ -579,8 +594,22 @@ class PhysicsPlotter:
         sns.set_theme(style=self.config.style)
 
         for lt in leads:
-            sub = df_all[(df_all["lead_hours"] == lt) & (df_all["variable"].str.startswith("KE")) & (df_all["wavenumber"] > 0)]
-            if sub.empty: continue
+            sub_frames = []
+            for model in MODELS:
+                df_model = df_all[(df_all["model"] == model) & (df_all["variable"].str.startswith("KE")) & (df_all["wavenumber"] > 0)]
+                if df_model.empty: continue
+                avail = df_model["lead_hours"].dropna().unique()
+                if len(avail) == 0: continue
+                nearest = min(avail, key=lambda x: abs(x - lt))
+                df_model_lt = df_model[df_model["lead_hours"] == nearest].copy()
+                if nearest != lt:
+                    df_model_lt["plot_label"] = f"{NICE.get(model, model)} ({int(nearest)}h)*"
+                else:
+                    df_model_lt["plot_label"] = NICE.get(model, model)
+                sub_frames.append(df_model_lt)
+                
+            if not sub_frames: continue
+            sub = pd.concat(sub_frames, ignore_index=True)
             
             fig, ax = plt.subplots(figsize=(10, 5))
             
@@ -594,7 +623,8 @@ class PhysicsPlotter:
                 if msub.empty: continue
                 msub_agg = msub.groupby("wavenumber")["power_pred"].mean().reset_index()
                 wl = 2.0 * np.pi * EARTH_RADIUS_KM / msub_agg["wavenumber"].values
-                ax.loglog(wl, msub_agg["power_pred"].values, color=self._get_color(model), linewidth=1.5, label=NICE.get(model, model))
+                label = msub["plot_label"].iloc[0]
+                ax.loglog(wl, msub_agg["power_pred"].values, color=self._get_color(model), linewidth=1.5, label=label)
                 
             ax.set_title(f"KE Spectrum - {lt}h", fontsize=45)
             ax.set_xlabel("Wavelength (km)", fontsize=35)
@@ -644,8 +674,21 @@ class PhysicsPlotter:
             legend_labels = None
             
             for ax, lt in zip(axes, leads):
-                sub = df_all[(df_all["lead_hours"] == lt) & (df_all["region"] == region)]
-                if sub.empty: continue
+                sub_frames = []
+                for model in MODELS:
+                    df_model = df_all[(df_all["model"] == model) & (df_all["region"] == region)]
+                    if df_model.empty: continue
+                    avail = df_model["lead_hours"].dropna().unique()
+                    if len(avail) == 0: continue
+                    nearest = min(avail, key=lambda x: abs(x - lt))
+                    df_model_lt = df_model[df_model["lead_hours"] == nearest].copy()
+                    if nearest != lt:
+                        df_model_lt["plot_label"] = f"{NICE.get(model, model)} ({int(nearest)}h)*"
+                    else:
+                        df_model_lt["plot_label"] = NICE.get(model, model)
+                    sub_frames.append(df_model_lt)
+                if not sub_frames: continue
+                sub = pd.concat(sub_frames, ignore_index=True)
                 y_max = 0.0
                 
                 b_unique = np.sort(sub["bin_edge_lower"].unique())
@@ -675,13 +718,14 @@ class PhysicsPlotter:
                     y = m_agg["freq_pred"].to_numpy()
                     if y.size:
                         y_max = max(y_max, float(np.nanmax(y)))
+                    label = msub["plot_label"].iloc[0]
                     ax.plot(
                         x,
                         y,
                         color=self._get_color(model),
                         linewidth=1.7,
                         alpha=0.95,
-                        label=NICE.get(model, model),
+                        label=label,
                         zorder=3 + i,
                     )
                 
