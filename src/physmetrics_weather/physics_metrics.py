@@ -322,49 +322,41 @@ def derive_surface_pressure(
 # ============================================================================
 
 def _integrate_column(
-    field_3d: np.ndarray,
+    field: xr.DataArray,
     levels_hpa: np.ndarray,
-    ps_2d: np.ndarray,
+    ps: xr.DataArray,
     gravity: float = GRAVITY,
-) -> np.ndarray:
-    """Trapezoidal column integration with surface-pressure masking.
-
-    Args:
-        field_3d: 3D numpy array of vertical field values (level, lat, lon).
-        levels_hpa: 1D numpy array of pressure levels in hPa.
-        ps_2d: 2D numpy array of surface pressure in Pa (lat, lon).
-        gravity: Gravitational acceleration in m/s².
-
-    Returns:
-        2D numpy array of vertical column integrated values (lat, lon).
-    """
-    levels_pa = levels_hpa.astype(np.float64) * 100.0
+    level_dim: str = "level",
+) -> xr.DataArray:
+    levels_pa = np.asarray(levels_hpa, dtype=np.float64) * 100.0
     sort_idx = np.argsort(levels_pa)
-    levels_sorted = levels_pa[sort_idx]
-    field_sorted = field_3d[sort_idx]
-
-    n = len(levels_sorted)
-    col = np.zeros_like(ps_2d, dtype=np.float64)
-
-    dp_top = np.minimum(ps_2d, levels_sorted[0]) - 0.0
-    col += field_sorted[0] * dp_top
-
-    for k in range(n - 1):
-        p_top = levels_sorted[k]
-        p_bot = levels_sorted[k + 1]
-
-        eff_top = np.minimum(ps_2d, p_top)
-        eff_bot = np.minimum(ps_2d, p_bot)
-        dp = np.maximum(0.0, eff_bot - eff_top)
-
-        field_avg = 0.5 * (field_sorted[k] + field_sorted[k + 1])
-        col += field_avg * dp
-
-    dp_bottom = np.maximum(0.0, ps_2d - levels_sorted[-1])
-    col += field_sorted[-1] * dp_bottom
-
-    col /= gravity
-    return col
+    p = xr.DataArray(levels_pa[sort_idx], dims=[level_dim], coords={level_dim: levels_pa[sort_idx]})
+    f = field.isel({level_dim: sort_idx})
+    f = f.assign_coords({level_dim: p})
+    
+    p_top = p.isel({level_dim: slice(0, -1)})
+    p_bot = p.isel({level_dim: slice(1, None)})
+    p_bot = p_bot.assign_coords({level_dim: p_top[level_dim]})
+    
+    f_top = f.isel({level_dim: slice(0, -1)})
+    f_bot = f.isel({level_dim: slice(1, None)})
+    f_bot = f_bot.assign_coords({level_dim: p_top[level_dim]})
+    
+    f_avg = 0.5 * (f_top + f_bot)
+    
+    eff_top = xr.where(ps < p_top, ps, p_top)
+    eff_bot = xr.where(ps < p_bot, ps, p_bot)
+    dp = xr.where((eff_bot - eff_top) > 0, eff_bot - eff_top, 0.0)
+    
+    col = (f_avg * dp).sum(dim=level_dim)
+    
+    dp_top = xr.where(ps < p[0], ps, p[0]) - 0.0
+    col += f.isel({level_dim: 0}).drop_vars(level_dim) * dp_top
+    
+    dp_bot = xr.where(ps > p[-1], ps - p[-1], 0.0)
+    col += f.isel({level_dim: -1}).drop_vars(level_dim) * dp_bot
+    
+    return col / gravity
 
 
 def _ensure_ps_2d(ps: xr.DataArray) -> np.ndarray:
@@ -409,7 +401,7 @@ def _compute_tcwv(
         levels: Optional array of pressure levels in hPa.
 
     Returns:
-        2D DataArray containing TCWV values in kg/m².
+        N-D DataArray containing TCWV values in kg/m².
     """
     if q_name not in ds.data_vars:
         q_name = DatasetValidator.require_variable(ds, Q_NAMES, "Specific Humidity")
@@ -418,19 +410,11 @@ def _compute_tcwv(
     if levels is None:
         levels = ds[level_dim].values
 
-    ps_np = _ensure_ps_2d(ps)
-    lat_dim = [d for d in q.dims if d != level_dim][0]
-    lon_dim = [d for d in q.dims if d != level_dim][1]
+    tcwv = _integrate_column(q, levels, ps, level_dim=level_dim)
 
-    tcwv_np = _integrate_column(q.transpose(level_dim, ...).values, levels, ps_np)
-
-    return xr.DataArray(
-        tcwv_np,
-        dims=[lat_dim, lon_dim],
-        coords={lat_dim: q[lat_dim], lon_dim: q[lon_dim]},
-        name="tcwv",
-        attrs={"units": "kg/m²", "long_name": "Total Column Water Vapour"},
-    )
+    tcwv.name = "tcwv"
+    tcwv.attrs = {"units": "kg/m²", "long_name": "Total Column Water Vapour"}
+    return tcwv
 
 
 # ============================================================================
@@ -445,54 +429,17 @@ def compute_dry_air_mass(
     level_dim: str = "level",
     levels: Optional[np.ndarray] = None,
     tcwv: Optional[xr.DataArray] = None,
-) -> Union[float, Dict[Any, float]]:
-    """Compute global dry air mass in Exagrams (10¹⁸ kg).
-
-    Formula:
-        M_d = Σ A_i × (P_s,i / g − TCWV_i)
-
-    Ensemble Support:
-        If `ds` or `ps` contains an ensemble dimension (e.g. 'ens', 'member',
-        'realization'), the function computes the dry air mass for each member and
-        returns a dictionary mapping member IDs to their respective values.
-
-    Args:
-        ds: Dataset containing specific humidity field.
-        ps: Surface pressure DataArray.
-        area: Grid cell area DataArray (m²).
-        q_name: Variable name for specific humidity.
-        level_dim: Dimension name for pressure levels.
-        levels: Optional array of pressure levels in hPa.
-        tcwv: Optional pre-computed TCWV DataArray.
-
-    Returns:
-        Float (if deterministic) or Dict[member, float] (if ensemble) representing
-        global dry air mass in Eg.
-
-    Raises:
-        ValueError: If area and data grid shapes mismatch.
-    """
-    ens_dim = _detect_ensemble_dim(ds) or _detect_ensemble_dim(ps)
-    if ens_dim is not None and ens_dim in ds.dims:
-        results = {}
-        for m in ds[ens_dim].values:
-            ds_m = ds.sel({ens_dim: m})
-            ps_m = ps.sel({ens_dim: m}) if ens_dim in ps.dims else ps
-            tcwv_m = tcwv.sel({ens_dim: m}) if (tcwv is not None and ens_dim in tcwv.dims) else None
-            results[m] = float(compute_dry_air_mass(
-                ds_m, ps_m, area, q_name=q_name, level_dim=level_dim, levels=levels, tcwv=tcwv_m
-            ))
-        return results
-
+) -> Union[xr.DataArray, float, Dict[Any, float]]:
     if tcwv is None:
         tcwv = _compute_tcwv(ds, ps, q_name=q_name, level_dim=level_dim, levels=levels)
-
     col_dry = ps / GRAVITY - tcwv
-    if area.shape != col_dry.shape:
-        raise ValueError(f"Area shape {area.shape} and data shape {col_dry.shape} do not match.")
-
-    dry_mass_kg = float((area * col_dry).sum())
+    lat_dim = [d for d in col_dry.dims if "lat" in d.lower()][0]
+    lon_dim = [d for d in col_dry.dims if "lon" in d.lower()][0]
+    
+    area_aligned = xr.DataArray(area.values, dims=[lat_dim, lon_dim], coords={lat_dim: col_dry[lat_dim], lon_dim: col_dry[lon_dim]})
+    dry_mass_kg = (area_aligned * col_dry).sum(dim=[lat_dim, lon_dim], skipna=True, min_count=1)
     return dry_mass_kg / EXAGRAM
+
 
 
 # ============================================================================
@@ -507,49 +454,15 @@ def compute_water_mass(
     level_dim: str = "level",
     levels: Optional[np.ndarray] = None,
     tcwv: Optional[xr.DataArray] = None,
-) -> Union[float, Dict[Any, float]]:
-    """Compute global total atmospheric water mass in kg.
-
-    Formula:
-        M_w = Σ A_i × TCWV_i
-
-    Ensemble Support:
-        If `ds` or `ps` contains an ensemble dimension, evaluates the water mass per
-        member and returns a dictionary mapping member IDs to values.
-
-    Args:
-        ds: Dataset containing specific humidity.
-        ps: Surface pressure DataArray.
-        area: Grid cell area DataArray (m²).
-        q_name: Variable name for specific humidity.
-        level_dim: Dimension name for pressure levels.
-        levels: Optional array of pressure levels in hPa.
-        tcwv: Optional pre-computed TCWV DataArray.
-
-    Returns:
-        Float (if deterministic) or Dict[member, float] (if ensemble) representing
-        global water mass in kg.
-
-    Raises:
-        ValueError: If area and TCWV shapes mismatch.
-    """
-    ens_dim = _detect_ensemble_dim(ds) or _detect_ensemble_dim(ps)
-    if ens_dim is not None and ens_dim in ds.dims:
-        results = {}
-        for m in ds[ens_dim].values:
-            ds_m = ds.sel({ens_dim: m})
-            ps_m = ps.sel({ens_dim: m}) if ens_dim in ps.dims else ps
-            tcwv_m = tcwv.sel({ens_dim: m}) if (tcwv is not None and ens_dim in tcwv.dims) else None
-            results[m] = float(compute_water_mass(
-                ds_m, ps_m, area, q_name=q_name, level_dim=level_dim, levels=levels, tcwv=tcwv_m
-            ))
-        return results
-
+) -> Union[xr.DataArray, float, Dict[Any, float]]:
     if tcwv is None:
         tcwv = _compute_tcwv(ds, ps, q_name=q_name, level_dim=level_dim, levels=levels)
-    if area.shape != tcwv.shape:
-        raise ValueError(f"Area shape {area.shape} and TCWV shape {tcwv.shape} do not match!")
-    return float((area * tcwv).sum())
+    lat_dim = [d for d in tcwv.dims if "lat" in d.lower()][0]
+    lon_dim = [d for d in tcwv.dims if "lon" in d.lower()][0]
+    
+    area_aligned = xr.DataArray(area.values, dims=[lat_dim, lon_dim], coords={lat_dim: tcwv[lat_dim], lon_dim: tcwv[lon_dim]})
+    return (area_aligned * tcwv).sum(dim=[lat_dim, lon_dim], skipna=True, min_count=1)
+
 
 
 # ============================================================================
@@ -570,106 +483,37 @@ def compute_total_energy(
     c_pd: float = C_PD,
     c_pv: float = C_PV,
     l_v: float = L_V,
-) -> Union[float, Dict[Any, float]]:
-    """Compute global total atmospheric energy in Joules (J).
-
-    Formula:
-        TE = (1/g) Σ A_i ∫ (c_p T + Φ_s + L_v q + ½(u² + v²)) dp
-        where c_p = c_pd (1 − q) + c_pv q.
-
-    Ensemble Support:
-        If `ds` or `ps` contains an ensemble dimension, evaluates total energy for
-        each ensemble member and returns a dictionary of results.
-
-    Args:
-        ds: Dataset containing temperature, humidity, and wind components.
-        ps: Surface pressure DataArray.
-        area: Grid cell area DataArray (m²).
-        z_sfc: Surface geopotential DataArray.
-        t_name: Temperature variable name.
-        q_name: Specific humidity variable name.
-        u_names: Candidate variable names for zonal wind.
-        v_names: Candidate variable names for meridional wind.
-        level_dim: Pressure level dimension name.
-        levels: Optional array of pressure levels in hPa.
-        c_pd: Specific heat capacity of dry air in J/(kg·K).
-        c_pv: Specific heat capacity of water vapor in J/(kg·K).
-        l_v: Latent heat of vaporization in J/kg.
-
-    Returns:
-        Float (if deterministic) or Dict[member, float] (if ensemble) of total energy in J.
-
-    Raises:
-        ValueError: If required variables (u, v, T, q) are missing or grids mismatch.
-    """
-    ens_dim = _detect_ensemble_dim(ds) or _detect_ensemble_dim(ps)
-    if ens_dim is not None and ens_dim in ds.dims:
-        results = {}
-        for m in ds[ens_dim].values:
-            ds_m = ds.sel({ens_dim: m})
-            ps_m = ps.sel({ens_dim: m}) if ens_dim in ps.dims else ps
-            results[m] = float(compute_total_energy(
-                ds_m, ps_m, area, z_sfc=z_sfc, t_name=t_name, q_name=q_name,
-                u_names=u_names, v_names=v_names, level_dim=level_dim, levels=levels,
-                c_pd=c_pd, c_pv=c_pv, l_v=l_v,
-            ))
-        return results
-
+) -> Union[xr.DataArray, float, Dict[Any, float]]:
     if levels is None:
         levels = ds[level_dim].values
-
-    t_var = (
-        t_name
-        if t_name in ds.data_vars
-        else DatasetValidator.require_variable(ds, T_NAMES, "Temperature")
-    )
-    q_var = (
-        q_name
-        if q_name in ds.data_vars
-        else DatasetValidator.require_variable(ds, Q_NAMES, "Specific Humidity")
-    )
-
-    T = ds[t_var].transpose(level_dim, ...).values
-    q = ds[q_var].transpose(level_dim, ...).values
-
+    t_var = t_name if t_name in ds.data_vars else DatasetValidator.require_variable(ds, T_NAMES, "Temperature")
+    q_var = q_name if q_name in ds.data_vars else DatasetValidator.require_variable(ds, Q_NAMES, "Specific Humidity")
+    T = ds[t_var]
+    q = ds[q_var]
     c_p = c_pd * (1.0 - q) + c_pv * q
-
     ref_var = ds[t_var]
-    lat_dim_ = [d for d in ref_var.dims if d != level_dim][0]
-    lon_dim_ = [d for d in ref_var.dims if d != level_dim][1]
-
+    lat_dim_ = [d for d in ref_var.dims if "lat" in d.lower()][0]
+    lon_dim_ = [d for d in ref_var.dims if "lon" in d.lower()][0]
+    
     lat_diff = abs(z_sfc.sizes[lat_dim_] - ref_var.sizes[lat_dim_])
     lon_diff = abs(z_sfc.sizes[lon_dim_] - ref_var.sizes[lon_dim_])
-
     if lat_diff <= 1 and lon_diff == 0:
-        z_aligned = z_sfc.reindex_like(ref_var.isel({level_dim: 0}), method="nearest")
+        z_aligned = z_sfc.reindex({lat_dim_: ref_var[lat_dim_], lon_dim_: ref_var[lon_dim_]}, method="nearest")
     else:
-        raise ValueError(
-            f"Grid mismatch too large: z_sfc={z_sfc.shape}, model={ref_var.shape}."
-        )
-
-    nlevels = T.shape[0]
-    z_sfc_np = z_aligned.values
-    z_sfc_3d = np.broadcast_to(z_sfc_np[None, :, :], (nlevels,) + z_sfc_np.shape)
-
+        raise ValueError(f"Grid mismatch too large: z_sfc={z_sfc.shape}, model={ref_var.shape}.")
+        
     u_var = DatasetValidator.require_variable(ds, u_names, "Zonal Wind (u)")
     v_var = DatasetValidator.require_variable(ds, v_names, "Meridional Wind (v)")
-
-    u_val = ds[u_var].transpose(level_dim, ...).values
-    v_val = ds[v_var].transpose(level_dim, ...).values
+    u_val = ds[u_var]
+    v_val = ds[v_var]
     wspd_sq = u_val**2 + v_val**2
+    
+    energy_density = c_p * T + z_aligned + l_v * q + 0.5 * wspd_sq
+    col_energy = _integrate_column(energy_density, levels, ps, level_dim=level_dim)
+    
+    area_aligned = xr.DataArray(area.values, dims=[lat_dim_, lon_dim_], coords={lat_dim_: col_energy[lat_dim_], lon_dim_: col_energy[lon_dim_]})
+    return (area_aligned * col_energy).sum(dim=[lat_dim_, lon_dim_], skipna=True, min_count=1)
 
-    energy_density = c_p * T + z_sfc_3d + l_v * q + 0.5 * wspd_sq
-    ps_np = _ensure_ps_2d(ps)
-    col_energy = _integrate_column(energy_density, levels, ps_np)
-    col_da = xr.DataArray(
-        col_energy,
-        dims=[lat_dim_, lon_dim_],
-        coords={lat_dim_: ds[lat_dim_], lon_dim_: ds[lon_dim_]},
-    )
-    if area.shape != col_da.shape:
-        raise ValueError(f"Area shape {area.shape} and ENERGY shape {col_da.shape} do not match!")
-    return float((area * col_da).sum())
 
 
 # ============================================================================
@@ -694,6 +538,9 @@ def _ke_spectrum_spharm(
     """
     u = np.asarray(u, dtype=np.float64).squeeze()
     v = np.asarray(v, dtype=np.float64).squeeze()
+    
+    u = np.nan_to_num(u, nan=0.0)
+    v = np.nan_to_num(v, nan=0.0)
 
     if u.ndim != 2 or v.ndim != 2:
         raise ValueError(f"Expected 2D wind fields, got u shape = {u.shape}, v shape = {v.shape}.")
@@ -749,6 +596,8 @@ def _scalar_spectrum_spharm(
         ValueError: If field array is not 2D or grid is invalid Driscoll-Healy.
     """
     field = np.asarray(field, dtype=np.float64).squeeze()
+
+    field = np.nan_to_num(field, nan=0.0)
 
     if field.ndim != 2:
         raise ValueError(f"Expected 2D field, got shape = {field.shape}")
@@ -1063,63 +912,23 @@ def compute_hydrostatic_imbalance(
     p_top: float = HYDROSTATIC_P_TOP,
     p_bot: float = HYDROSTATIC_P_BOT,
     r_dry: float = R_DRY,
-) -> Union[float, Dict[Any, float]]:
-    """Compute hydrostatic balance error RMSE (m²/s²) between p_top and p_bot.
-
-    Formula:
-        Error = abs((Φ_top − Φ_bot) − R_d T̄_v ln(p_bot/p_top))
-
-    Ensemble Support:
-        If `ds` contains an ensemble dimension, evaluates the hydrostatic error per
-        member and returns a dictionary mapping member IDs to RMSE values.
-
-    Args:
-        ds: Dataset containing geopotential and temperature fields.
-        area: Grid cell area DataArray (m²).
-        phi_name: Geopotential variable name.
-        t_name: Temperature variable name.
-        q_name: Specific humidity variable name.
-        level_dim: Pressure level dimension name.
-        lat_name: Latitude dimension name.
-        p_top: Upper pressure level in hPa.
-        p_bot: Lower pressure level in hPa.
-        r_dry: Gas constant for dry air in J/(kg·K).
-
-    Returns:
-        Float (if deterministic) or Dict[member, float] (if ensemble) representing
-        area-weighted hydrostatic balance RMSE in m²/s².
-
-    Raises:
-        ValueError: If geopotential or temperature variables are missing or shapes mismatch.
-    """
-    ens_dim = _detect_ensemble_dim(ds)
-    if ens_dim is not None and ens_dim in ds.dims:
-        results = {}
-        for m in ds[ens_dim].values:
-            results[m] = float(compute_hydrostatic_imbalance(
-                ds.sel({ens_dim: m}), area, phi_name=phi_name, t_name=t_name,
-                q_name=q_name, level_dim=level_dim, lat_name=lat_name,
-                p_top=p_top, p_bot=p_bot, r_dry=r_dry,
-            ))
-        return results
-
+) -> Union[xr.DataArray, float, Dict[Any, float]]:
     if level_dim not in ds.dims:
         level_dim = _detect_level_dim(ds)
     levels = ds[level_dim].values
-
     phi_var = phi_name or DatasetValidator.require_variable(ds, PHI_NAMES, "Geopotential")
     t_var = t_name or DatasetValidator.require_variable(ds, T_NAMES, "Temperature")
     q_var = q_name if q_name in ds.data_vars else _find_var(ds, Q_NAMES)
-
+    
     def _sel_level(var: str, p: float) -> xr.DataArray:
         idx = int(np.abs(levels - p).argmin())
-        return ds[var].isel({level_dim: idx})
-
+        return ds[var].isel({level_dim: idx}).drop_vars(level_dim, errors="ignore")
+        
     phi_top = _sel_level(phi_var, p_top)
     phi_bot = _sel_level(phi_var, p_bot)
     T_top = _sel_level(t_var, p_top)
     T_bot = _sel_level(t_var, p_bot)
-
+    
     if q_var is not None and q_var in ds.data_vars:
         q_top = _sel_level(q_var, p_top)
         q_bot = _sel_level(q_var, p_bot)
@@ -1128,23 +937,22 @@ def compute_hydrostatic_imbalance(
     else:
         Tv_top = T_top
         Tv_bot = T_bot
-
+        
     Tv_mean = 0.5 * (Tv_top + Tv_bot)
     lhs = phi_top - phi_bot
     rhs = r_dry * Tv_mean * np.log(p_bot / p_top)
     error = lhs - rhs
-
+    
     lat_dim_e = next((d for d in error.dims if "lat" in d.lower()), None)
     lon_dim_e = next((d for d in error.dims if "lon" in d.lower()), None)
-    if lat_dim_e and lon_dim_e and error.dims != (lat_dim_e, lon_dim_e):
-        error = error.transpose(lat_dim_e, lon_dim_e)
+    if lat_dim_e and lon_dim_e and list(error.dims)[-2:] != [lat_dim_e, lon_dim_e]:
+        error = error.transpose(..., lat_dim_e, lon_dim_e)
+        
+    area_aligned = xr.DataArray(area.values, dims=[lat_dim_e, lon_dim_e], coords={lat_dim_e: error[lat_dim_e], lon_dim_e: error[lon_dim_e]})
+    weights = area_aligned / area_aligned.sum(dim=[lat_dim_e, lon_dim_e])
+    mse = (weights * error**2).sum(dim=[lat_dim_e, lon_dim_e], skipna=True, min_count=1)
+    return mse ** 0.5
 
-    if area.shape != error.shape:
-        raise ValueError(f"Area shape {area.shape} and error shape {error.shape} do not match.")
-
-    weights = area / float(area.sum())
-    mse = float((weights.values * error.values**2).sum())
-    return float(np.sqrt(mse))
 
 
 # ============================================================================
@@ -1164,120 +972,71 @@ def compute_geostrophic_imbalance(
     lat_cutoff: float = GEOSTROPHIC_LAT_CUTOFF,
     earth_radius: float = EARTH_RADIUS,
     omega: float = OMEGA,
-) -> Union[float, Dict[Any, float]]:
-    """Compute geostrophic wind balance RMSE (m/s) at a given pressure level.
-
-    Formula:
-        f u_g = -∂Φ/∂y,  f v_g = ∂Φ/∂x
-        Error = sqrt(area_weighted_mean((u - u_g)² + (v - v_g)²))
-
-    Args:
-        ds: Input Dataset containing geopotential and wind components.
-        area: Grid cell area DataArray (m²).
-        phi_name: Geopotential variable name.
-        u_names: Zonal wind variable name candidates.
-        v_names: Meridional wind variable name candidates.
-        level: Target pressure level in hPa (default: 500.0).
-        level_dim: Pressure level dimension name.
-        lat_name: Latitude coordinate name.
-        lon_name: Longitude coordinate name.
-        lat_cutoff: Latitude cutoff in degrees (excluding tropics near equator).
-        earth_radius: Mean Earth radius in meters.
-        omega: Earth angular rotation velocity in rad/s.
-
-    Returns:
-        Float (if deterministic) or Dict[member, float] (if ensemble) representing
-        area-weighted geostrophic balance RMSE in m/s.
-
-    Raises:
-        KeyError: If geopotential or wind variables are missing.
-    """
-    ens_dim = _detect_ensemble_dim(ds)
-    if ens_dim is not None and ens_dim in ds.dims:
-        results = {}
-        for m in ds[ens_dim].values:
-            results[m] = float(compute_geostrophic_imbalance(
-                ds.sel({ens_dim: m}), area, phi_name=phi_name, u_names=u_names,
-                v_names=v_names, level=level, level_dim=level_dim,
-                lat_name=lat_name, lon_name=lon_name, lat_cutoff=lat_cutoff,
-                earth_radius=earth_radius, omega=omega,
-            ))
-        return results
-
+) -> Union[xr.DataArray, float, Dict[Any, float]]:
     if level_dim not in ds.dims:
         level_dim = _detect_level_dim(ds)
-
     levels = ds[level_dim].values
     idx = int(np.abs(levels - level).argmin())
-
-    phi_var = (
-        phi_name
-        if phi_name in ds.data_vars
-        else DatasetValidator.require_variable(ds, PHI_NAMES, "Geopotential")
-    )
+    
+    phi_var = phi_name if phi_name in ds.data_vars else DatasetValidator.require_variable(ds, PHI_NAMES, "Geopotential")
     phi = ds[phi_var]
     if level_dim in phi.dims:
-        phi = phi.isel({level_dim: idx})
-
+        phi = phi.isel({level_dim: idx}).drop_vars(level_dim, errors="ignore")
+        
     u_var = DatasetValidator.require_variable(ds, u_names, "Zonal Wind (u)")
     v_var = DatasetValidator.require_variable(ds, v_names, "Meridional Wind (v)")
-
     u_actual = ds[u_var]
     v_actual = ds[v_var]
     if level_dim in u_actual.dims:
-        u_actual = u_actual.isel({level_dim: idx})
-        v_actual = v_actual.isel({level_dim: idx})
-
+        u_actual = u_actual.isel({level_dim: idx}).drop_vars(level_dim, errors="ignore")
+        v_actual = v_actual.isel({level_dim: idx}).drop_vars(level_dim, errors="ignore")
+        
     if lat_name in phi.dims and lon_name in phi.dims:
-        phi = phi.transpose(lat_name, lon_name)
-        u_actual = u_actual.transpose(lat_name, lon_name)
-        v_actual = v_actual.transpose(lat_name, lon_name)
-
-    lat = ds[lat_name].values
-    lon = ds[lon_name].values
-
+        if list(phi.dims)[-2:] != [lat_name, lon_name]:
+            phi = phi.transpose(..., lat_name, lon_name)
+            u_actual = u_actual.transpose(..., lat_name, lon_name)
+            v_actual = v_actual.transpose(..., lat_name, lon_name)
+            
+    lat = ds[lat_name]
+    lon = ds[lon_name]
     lat_rad = np.deg2rad(lat)
     lon_rad = np.deg2rad(lon)
-
-    f_1d = 2.0 * omega * np.sin(lat_rad)
-    f_2d = f_1d[:, None] * np.ones((1, len(lon)))
+    
+    f = 2.0 * omega * np.sin(lat_rad)
     cos_lat = np.cos(lat_rad)
-    cos_2d = cos_lat[:, None] * np.ones((1, len(lon)))
+    
+    f_safe = xr.where(f == 0.0, 1e-10, f)
+    cos_lat_safe = xr.where(cos_lat == 0.0, 1e-10, cos_lat)
 
-    phi_np = phi.values
-    dPhi_dphi = np.gradient(phi_np, lat_rad, axis=0, edge_order=2)
-    phi_padded = np.pad(phi_np, pad_width=((0, 0), (1, 1)), mode="wrap")
-    dlon_rad = np.abs(lon_rad[1] - lon_rad[0])
-    dPhi_dlam = np.gradient(phi_padded, dlon_rad, axis=1)[:, 1:-1]
+    phi = phi.chunk({lat_name: -1, lon_name: -1})
+    dPhi_dphi = phi.differentiate(lat_name) * (180.0 / np.pi)
+    
+    phi_east = phi.shift({lon_name: -1})
+    phi_west = phi.shift({lon_name: 1})
 
-    with np.errstate(divide="ignore", invalid="ignore"):
-        u_g = -dPhi_dphi / (f_2d * earth_radius)
-        v_g = dPhi_dlam / (f_2d * earth_radius * cos_2d)
-
-    du = u_actual.values - u_g
-    dv = v_actual.values - v_g
+    phi_east = xr.where(phi_east.isnull(), phi.isel({lon_name: 0}), phi_east)
+    phi_west = xr.where(phi_west.isnull(), phi.isel({lon_name: -1}), phi_west)
+    dlon_rad = np.deg2rad(np.abs(lon.values[1] - lon.values[0]))
+    dPhi_dlam = (phi_east - phi_west) / (2.0 * dlon_rad)
+    
+    u_g = -dPhi_dphi / (f_safe * earth_radius)
+    v_g = dPhi_dlam / (f_safe * earth_radius * cos_lat_safe)
+    
+    du = u_actual - u_g
+    dv = v_actual - v_g
     vec_err_sq = du**2 + dv**2
-
+    
     lat_mask = (np.abs(lat) >= lat_cutoff) & (np.abs(lat) < 89.9)
-    mask_2d = lat_mask[:, None] * np.ones((1, len(lon)), dtype=bool)
-    vec_err_sq = np.where(mask_2d, np.nan_to_num(vec_err_sq, nan=0.0), 0.0)
-
-    area_vals = area.values
-    if area_vals.shape != vec_err_sq.shape:
-        area_da = get_grid_cell_area(ds)
-        if lat_name in area_da.dims and lon_name in area_da.dims:
-            area_da = area_da.transpose(lat_name, lon_name)
-        area_vals = area_da.values
-
-    w = area_vals.copy()
-    w[~mask_2d] = 0.0
-    w_sum = w.sum()
-    if w_sum == 0:
-        return float("nan")
-
+    vec_err_sq = xr.where(lat_mask, vec_err_sq.fillna(0.0), 0.0)
+    
+    area_aligned = xr.DataArray(area.values, dims=[lat_name, lon_name], coords={lat_name: ds[lat_name], lon_name: ds[lon_name]})
+    w = xr.where(lat_mask, area_aligned, 0.0)
+    w_sum = w.sum(dim=[lat_name, lon_name])
     w_norm = w / w_sum
-    mse = float((w_norm * vec_err_sq).sum())
-    return float(np.sqrt(mse))
+    
+    mse = (w_norm * vec_err_sq).sum(dim=[lat_name, lon_name], skipna=True, min_count=1)
+    return mse ** 0.5
+
 
 
 # ============================================================================
@@ -1455,62 +1214,28 @@ def compute_conservation_scalars(
     z_sfc: xr.DataArray,
     level_dim: str = "level",
     levels: Optional[np.ndarray] = None,
-) -> Union[Tuple[float, float, float], Dict[Any, Tuple[float, float, float]]]:
-    """Compute the three conservation scalars (dry mass, water mass, total energy).
-
-    Args:
-        ds: Input Dataset containing atmospheric state variables.
-        ps: Surface pressure DataArray.
-        area: Grid cell area DataArray (m²).
-        z_sfc: Surface geopotential DataArray.
-        level_dim: Pressure level dimension name.
-        levels: Optional array of pressure levels in hPa.
-
-    Returns:
-        Tuple of (dry_mass_Eg, water_mass_kg, total_energy_J) for deterministic inputs,
-        or Dict[member, Tuple[dry, water, energy]] for ensemble datasets.
-    """
-    ens_dim = _detect_ensemble_dim(ds)
-    if ens_dim is not None and ens_dim in ds.dims:
-        results = {}
-        for m in ds[ens_dim].values:
-            ds_m = ds.sel({ens_dim: m})
-            ps_m = ps.sel({ens_dim: m}) if ens_dim in ps.dims else ps
-            results[m] = compute_conservation_scalars(
-                ds_m, ps_m, area, z_sfc=z_sfc, level_dim=level_dim, levels=levels
-            )
-        return results
-
+) -> Union[Tuple[xr.DataArray, xr.DataArray, xr.DataArray], Tuple[float, float, float], Dict[Any, Tuple[float, float, float]]]:
     if level_dim not in ds.dims:
         level_dim = _detect_level_dim(ds)
     if levels is None and level_dim in ds.coords:
         levels = ds[level_dim].values
-
     q_name = _find_var(ds, Q_NAMES)
     t_name = _find_var(ds, T_NAMES) or "temperature"
     has_q = q_name is not None
-
     if has_q:
         tcwv = _compute_tcwv(ds, ps, q_name=q_name, level_dim=level_dim, levels=levels)
-        dry = float(compute_dry_air_mass(
-            ds, ps, area, q_name=q_name, level_dim=level_dim, levels=levels, tcwv=tcwv
-        ))
-        water = float(compute_water_mass(
-            ds, ps, area, q_name=q_name, level_dim=level_dim, levels=levels, tcwv=tcwv
-        ))
+        dry = compute_dry_air_mass(ds, ps, area, q_name=q_name, level_dim=level_dim, levels=levels, tcwv=tcwv)
+        water = compute_water_mass(ds, ps, area, q_name=q_name, level_dim=level_dim, levels=levels, tcwv=tcwv)
         try:
-            energy = float(compute_total_energy(
-                ds, ps, area, z_sfc=z_sfc, t_name=t_name, q_name=q_name,
-                level_dim=level_dim, levels=levels
-            ))
+            energy = compute_total_energy(ds, ps, area, z_sfc=z_sfc, t_name=t_name, q_name=q_name, level_dim=level_dim, levels=levels)
         except (ValueError, KeyError, AttributeError):
-            energy = float("nan")
+            energy = xr.full_like(dry, np.nan)
     else:
-        dry = float("nan")
-        water = float("nan")
-        energy = float("nan")
-
+        dry = xr.DataArray(np.nan)
+        water = xr.DataArray(np.nan)
+        energy = xr.DataArray(np.nan)
     return dry, water, energy
+
 
 
 def compute_pure_tcwv(
@@ -1518,45 +1243,34 @@ def compute_pure_tcwv(
     q_name: str = "q",
     level_dim: str = "level",
 ) -> xr.DataArray:
-    """Integrate specific humidity purely over fixed pressure levels without ps masking.
-
-    Args:
-        ds: Input Dataset containing specific humidity.
-        q_name: Variable name for specific humidity.
-        level_dim: Pressure level dimension name.
-
-    Returns:
-        2D DataArray containing unmasked TCWV values in kg/m².
-
-    Raises:
-        KeyError: If specific humidity variable is not found in dataset.
-    """
     if q_name not in ds.data_vars:
         q_name = DatasetValidator.require_variable(ds, Q_NAMES, "Specific Humidity")
-
     q = ds[q_name]
     levels = ds[level_dim].values
     levels_pa = levels.astype(np.float64) * 100.0
+    
     sort_idx = np.argsort(levels_pa)
-    levels_sorted = levels_pa[sort_idx]
-    q_sorted = q.transpose(level_dim, ...).values[sort_idx]
+    p = xr.DataArray(levels_pa[sort_idx], dims=[level_dim], coords={level_dim: levels_pa[sort_idx]})
+    q_sorted = q.isel({level_dim: sort_idx}).assign_coords({level_dim: p})
+    
+    p_top = p.isel({level_dim: slice(0, -1)})
+    p_bot = p.isel({level_dim: slice(1, None)})
+    p_bot = p_bot.assign_coords({level_dim: p_top[level_dim]})
+    
+    q_top = q_sorted.isel({level_dim: slice(0, -1)})
+    q_bot = q_sorted.isel({level_dim: slice(1, None)})
+    q_bot = q_bot.assign_coords({level_dim: p_top[level_dim]})
+    
+    q_avg = 0.5 * (q_top + q_bot)
+    dp = p_bot - p_top
+    
+    col = (q_avg * dp).sum(dim=level_dim)
+    
+    col.name = "tcwv_pure"
+    col.attrs = {
+        "units": "kg/m²",
+        "long_name": "TCWV (fixed pressure levels, no surface pressure)",
+    }
+    return col / GRAVITY
 
-    col = np.zeros_like(q_sorted[0], dtype=np.float64)
-    for k in range(len(levels_sorted) - 1):
-        dp = levels_sorted[k + 1] - levels_sorted[k]
-        q_avg = 0.5 * (q_sorted[k] + q_sorted[k + 1])
-        col += q_avg * dp
 
-    lat_dim = [d for d in q.dims if d != level_dim][0]
-    lon_dim = [d for d in q.dims if d != level_dim][1]
-
-    return xr.DataArray(
-        col / GRAVITY,
-        dims=[lat_dim, lon_dim],
-        coords={lat_dim: q[lat_dim], lon_dim: q[lon_dim]},
-        name="tcwv_pure",
-        attrs={
-            "units": "kg/m²",
-            "long_name": "TCWV (fixed pressure levels, no surface pressure)",
-        },
-    )
