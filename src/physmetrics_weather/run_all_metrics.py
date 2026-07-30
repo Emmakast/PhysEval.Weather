@@ -14,7 +14,7 @@ Ensemble / Probabilistic Model Support:
     'ensemble', 'number') in input datasets. Evaluates metrics for each ensemble
     member individually and labels output rows with the corresponding `ensemble_member`
     identifier (defaulting to 0 for deterministic models).
-
+            
 Usage:
     physmetrics-run --year 2020
     physmetrics-run --dates 2020-01-01 2020-01-02 --workers 4
@@ -66,7 +66,6 @@ from physmetrics_weather.physics_metrics import (
     get_grid_cell_area,
 )
 
-# Suppress xarray timedelta decoding warnings
 warnings.filterwarnings("ignore", category=FutureWarning, message=".*prediction_timedelta.*")
 
 
@@ -541,15 +540,34 @@ def _evaluate_one(
             ds_model_t = ds_model_full.sel(time=init_time)
             pred_td_dim = _detect_pred_td_dim(ds_model_t)
             if pred_td_dim is not None and pred_td_dim in ds_model_t.dims:
-                ds_model_t = ds_model_t.sel({pred_td_dim: lead_td}, method="nearest")
-                actual_td = ds_model_t.coords.get(pred_td_dim)
+                check_var = _find_var(ds_model_t, PHI_NAMES) or _find_var(ds_model_t, U_NAMES) or _find_var(ds_model_t, T_NAMES)
+                if check_var:
+                    t_check = ds_model_t[check_var]
+                    dims_to_isel = {d: 0 for d in t_check.dims if d != pred_td_dim}
+                    t_check = t_check.isel(dims_to_isel).compute()
+                    valid_tds = t_check.dropna(dim=pred_td_dim)[pred_td_dim]
+                    if len(valid_tds) > 0:
+                        nearest_td = valid_tds.sel({pred_td_dim: lead_td}, method="nearest").values
+                        ds_model_t = ds_model_t.sel({pred_td_dim: nearest_td})
+                        actual_td = nearest_td
+                    else:
+                        ds_model_t = ds_model_t.sel({pred_td_dim: lead_td}, method="nearest")
+                        actual_td = ds_model_t.coords.get(pred_td_dim)
+                else:
+                    ds_model_t = ds_model_t.sel({pred_td_dim: lead_td}, method="nearest")
+                    actual_td = ds_model_t.coords.get(pred_td_dim)
+
                 if actual_td is not None:
-                    actual_td_val = actual_td.values
+                    actual_td_val = actual_td.values if hasattr(actual_td, "values") else actual_td
                     if isinstance(actual_td_val, np.timedelta64) and actual_td_val != lead_td:
                         _log(
                             f"    [{counter}] Requested lead={lead_td}, "
-                            f"nearest available={actual_td_val}"
+                            f"nearest available={actual_td_val}. Adapting evaluation."
                         )
+
+                        lead_td = actual_td_val
+                        lead_hours = int(lead_td / np.timedelta64(1, "h"))
+                        valid_time = init_time + lead_td
                         _lead_td_mismatch = True
 
             ens_dim = _detect_ensemble_dim(ds_model_t)
@@ -658,7 +676,7 @@ def _evaluate_one(
         return summary_rows, ts_rows, spectrum_rows, lr_dist_rows
 
     _mode_valid = mode in ("joint", "prediction", "model")
-    if _mode_valid and ds_model_full is not None and not _lead_td_mismatch:
+    if _mode_valid and ds_model_full is not None:
         try:
             td_start = np.timedelta64(12, "h")
             td_end = DRIFT_WINDOW_END.get(lead_hours, lead_td)
@@ -671,140 +689,122 @@ def _evaluate_one(
             if len(avail_tds) >= 2:
                 model_level_dim_d = _detect_level_dim(ds_pred_window)
 
+                if not _use_ref_sp:
+                    try:
+                        ps_pred_window = _get_ps(ds_pred_window, ds_static_model, level_dim=model_level_dim_d)
+                        step_sp_method = ps_pred_window.attrs.get("derivation_method", "unknown")
+                    except (ValueError, KeyError, AttributeError):
+                        ps_pred_window = None
+                        step_sp_method = "failed"
+                else:
+                    ps_pred_window = ps_model
+                    step_sp_method = "ref_sp"
+
+                t_name_for_nan = _find_var(ds_pred_window, T_NAMES) or "temperature"
+                nan_arr = xr.full_like(
+                    ds_pred_window[t_name_for_nan].isel({model_level_dim_d: 0, "latitude": 0, "longitude": 0}, drop=True),
+                    np.nan
+                )
+                
+                try:
+                    dry, water, energy = compute_conservation_scalars(
+                        ds_pred_window, ps_pred_window, area_model, z_sfc=z_sfc_model, level_dim=model_level_dim_d
+                    )
+                except (ValueError, KeyError, AttributeError):
+                    dry, water, energy = nan_arr, nan_arr, nan_arr
+                    step_sp_method = "failed"
+                    
+                try:
+                    hydro = compute_hydrostatic_imbalance(ds_pred_window, area_model, level_dim=model_level_dim_d)
+                except (ValueError, KeyError, AttributeError):
+                    hydro = nan_arr
+                    
+                try:
+                    geo = compute_geostrophic_imbalance(ds_pred_window, area_model, level_dim=model_level_dim_d)
+                except (ValueError, KeyError, AttributeError):
+                    geo = nan_arr
+                    
+                ds_metrics = xr.Dataset({
+                    "dry_mass_Eg": dry,
+                    "water_mass_kg": water,
+                    "total_energy_J": energy,
+                    "hydrostatic_rmse": hydro,
+                    "geostrophic_rmse": geo,
+                })
+                
+                ds_metrics = ds_metrics.compute()
+                df_metrics = ds_metrics.to_dataframe().reset_index()
+                
                 for m in ens_members:
-                    if ens_dim and ens_dim in ds_pred_window.dims:
-                        ds_pred_m = ds_pred_window.sel({ens_dim: m})
+                    if ens_dim and ens_dim in df_metrics.columns:
+                        df_m = df_metrics[df_metrics[ens_dim] == m].copy()
                     else:
-                        ds_pred_m = ds_pred_window
-                    hours_model, dry_vals, water_vals, energy_vals = [], [], [], []
-                    hydro_vals, geo_vals = [], []
-
-                    for td_val in avail_tds:
-                        snap = ds_pred_m.sel({pred_td_dim: td_val}).load()
-
-                        if "latitude" in snap.dims and "longitude" in snap.dims:
-                            sdims = list(snap.dims)
-                            si_lon = sdims.index("longitude")
-                            si_lat = sdims.index("latitude")
-                            if si_lon < si_lat:
-                                sdims[si_lon], sdims[si_lat] = sdims[si_lat], sdims[si_lon]
-                                snap = snap.transpose(*sdims)
-
-                        try:
-                            if not _use_ref_sp:
-                                ps_snap = _get_ps(
-                                    snap, ds_static_model, level_dim=model_level_dim_d
-                                )
-                            else:
-                                ps_snap = ps_model
-
-                            dry, water, energy = compute_conservation_scalars(
-                                snap,
-                                ps_snap,
-                                area_model,
-                                z_sfc=z_sfc_model,
-                                level_dim=model_level_dim_d,
-                            )
-                            step_sp_method = (
-                                ps_snap.attrs.get("derivation_method", "unknown")
-                                if ps_snap is not None
-                                else "none"
-                            )
-                        except (ValueError, KeyError, AttributeError):
-                            dry, water, energy = float("nan"), float("nan"), float("nan")
-                            step_sp_method = "failed"
-
-                        try:
-                            hydro = float(
-                                compute_hydrostatic_imbalance(
-                                    snap, area_model, level_dim=model_level_dim_d
-                                )
-                            )
-                        except (ValueError, KeyError, AttributeError):
-                            hydro = float("nan")
-                        try:
-                            geo = float(
-                                compute_geostrophic_imbalance(
-                                    snap, area_model, level_dim=model_level_dim_d
-                                )
-                            )
-                        except (ValueError, KeyError, AttributeError):
-                            geo = float("nan")
-
-                        h = float(td_val / np.timedelta64(1, "h"))
-                        hours_model.append(h)
-                        dry_vals.append(dry)
-                        water_vals.append(water)
-                        energy_vals.append(energy)
-                        hydro_vals.append(hydro)
-                        geo_vals.append(geo)
-
-                        ts_rows.append(
-                            {
-                                "date": date_str,
-                                "forecast_hour": h,
-                                "dry_mass_Eg": dry,
-                                "water_mass_kg": water,
-                                "total_energy_J": energy,
-                                "hydrostatic_rmse": hydro,
-                                "geostrophic_rmse": geo,
-                                "sp_method": step_sp_method,
-                                "ensemble_member": m,
-                            }
-                        )
-
-                    hours_model_arr = np.array(hours_model)
-                    dry_vals_arr = np.array(dry_vals)
-                    water_vals_arr = np.array(water_vals)
-                    energy_vals_arr = np.array(energy_vals)
-
+                        df_m = df_metrics.copy()
+                        
+                    df_m = df_m.sort_values(pred_td_dim)
+                    
+                    hours_model = np.array([float(td / np.timedelta64(1, "h")) for td in df_m[pred_td_dim].values])
+                    dry_vals = df_m["dry_mass_Eg"].values
+                    water_vals = df_m["water_mass_kg"].values
+                    energy_vals = df_m["total_energy_J"].values
+                    hydro_vals = df_m["hydrostatic_rmse"].values
+                    geo_vals = df_m["geostrophic_rmse"].values
+                    
+                    for i, h in enumerate(hours_model):
+                        ts_rows.append({
+                            "date": date_str,
+                            "forecast_hour": float(h),
+                            "dry_mass_Eg": float(dry_vals[i]),
+                            "water_mass_kg": float(water_vals[i]),
+                            "total_energy_J": float(energy_vals[i]),
+                            "hydrostatic_rmse": float(hydro_vals[i]),
+                            "geostrophic_rmse": float(geo_vals[i]),
+                            "sp_method": step_sp_method,
+                            "ensemble_member": m,
+                        })
+                        
                     ref_hydro, ref_geo = None, None
                     if ds_ref_t is not None:
                         ref_ld = _detect_level_dim(ds_ref_t)
                         try:
-                            ref_hydro = float(
-                                compute_hydrostatic_imbalance(ds_ref_t, area, level_dim=ref_ld)
-                            )
+                            ref_hydro = float(compute_hydrostatic_imbalance(ds_ref_t, area, level_dim=ref_ld))
                         except (ValueError, KeyError, AttributeError):
                             pass
                         try:
-                            ref_geo = float(
-                                compute_geostrophic_imbalance(ds_ref_t, area, level_dim=ref_ld)
-                            )
+                            ref_geo = float(compute_geostrophic_imbalance(ds_ref_t, area, level_dim=ref_ld))
                         except (ValueError, KeyError, AttributeError):
                             pass
+                            
+                    if len(hydro_vals) > 0:
+                        _append_summary("hydrostatic_rmse", float(hydro_vals[-1]), ref_hydro, ens_member=m)
+                        _append_summary("geostrophic_rmse", float(geo_vals[-1]), ref_geo, ens_member=m)
 
-                    _append_summary("hydrostatic_rmse", hydro_vals[-1], ref_hydro, ens_member=m)
-                    _append_summary("geostrophic_rmse", geo_vals[-1], ref_geo, ens_member=m)
+                    slope_dry = compute_drift_slope(hours_model, dry_vals)
+                    slope_water = compute_drift_slope(hours_model, water_vals)
+                    slope_energy = compute_drift_slope(hours_model, energy_vals)
 
-                    slope_dry = compute_drift_slope(hours_model_arr, dry_vals_arr)
-                    slope_water = compute_drift_slope(hours_model_arr, water_vals_arr)
-                    slope_energy = compute_drift_slope(hours_model_arr, energy_vals_arr)
-                    dry_ref = float(dry_vals_arr[0]) if len(dry_vals_arr) > 0 else 0.0
+                    valid_dry = dry_vals[np.isfinite(dry_vals)]
+                    dry_ref = float(valid_dry[0]) if len(valid_dry) > 0 else 0.0
+
+                    valid_water = water_vals[np.isfinite(water_vals)]
+                    water_ref = float(valid_water[0]) if len(valid_water) > 0 else 0.0
+
+                    valid_energy = energy_vals[np.isfinite(energy_vals)]
+                    energy_ref = float(valid_energy[0]) if len(valid_energy) > 0 else 0.0
 
                     _append_summary(
                         "dry_mass_drift_pct_per_day",
-                        (slope_dry / dry_ref * 100.0)
-                        if dry_ref != 0 and np.isfinite(slope_dry)
-                        else float("nan"),
+                        (slope_dry / dry_ref * 100.0) if dry_ref != 0 and np.isfinite(slope_dry) else float("nan"),
                         ens_member=m,
                     )
                     _append_summary(
                         "water_mass_drift_pct_per_day",
-                        (slope_water / water_vals_arr[0] * 100.0)
-                        if len(water_vals_arr) > 0
-                        and water_vals_arr[0] != 0
-                        and np.isfinite(slope_water)
-                        else float("nan"),
+                        (slope_water / water_ref * 100.0) if water_ref != 0 and np.isfinite(slope_water) else float("nan"),
                         ens_member=m,
                     )
                     _append_summary(
                         "total_energy_drift_pct_per_day",
-                        (slope_energy / energy_vals_arr[0] * 100.0)
-                        if len(energy_vals_arr) > 0
-                        and energy_vals_arr[0] != 0
-                        and np.isfinite(slope_energy)
-                        else float("nan"),
+                        (slope_energy / energy_ref * 100.0) if energy_ref != 0 and np.isfinite(slope_energy) else float("nan"),
                         ens_member=m,
                     )
         except (ValueError, KeyError, AttributeError) as exc:
@@ -813,7 +813,6 @@ def _evaluate_one(
     if (
         mode in ("joint", "prediction", "model")
         and ds_model_full is not None
-        and not _lead_td_mismatch
     ):
         try:
             ds_ref_aligned = _align_ref_to_model(ds_ref_t, ds_model_t)
@@ -829,6 +828,7 @@ def _evaluate_one(
                 else:
                     ds_model_m = ds_model_t
 
+                # Environmental Lapse Rate Wasserstein Distance
                 try:
                     lr_results = compute_lapse_rate_wasserstein(
                         ds_model_m, ds_ref_aligned, area_model
@@ -856,42 +856,52 @@ def _evaluate_one(
                         phi_bot = ds[phi_var].isel({ld: idx_bot})
                         return -9.80665 * (t_top - t_bot) / (phi_top - phi_bot) * 1000.0
 
-                    gamma_pred = _get_gamma(ds_model_m, t_name_p, phi_name_p, ld_p)
-                    gamma_ref = _get_gamma(ds_ref_aligned, t_name_r, phi_name_r, ld_r)
+                    if t_name_p and phi_name_p and t_name_r and phi_name_r:
+                        gamma_pred = _get_gamma(ds_model_m, t_name_p, phi_name_p, ld_p)
+                        gamma_ref = _get_gamma(ds_ref_aligned, t_name_r, phi_name_r, ld_r)
 
-                    # Define region masks
-                    lat_p = ds_model_m.latitude
-                    regions = {
-                        "tropics": (lat_p >= -30) & (lat_p <= 30),
-                        "nh_mid": (lat_p > 30) & (lat_p <= 60),
-                        "sh_mid": (lat_p >= -60) & (lat_p < -30)
-                    }
+                        # Define region masks
+                        lat_p = ds_model_m.latitude
+                        regions = {
+                            "tropics": (lat_p >= -30) & (lat_p <= 30),
+                            "nh_mid": (lat_p > 30) & (lat_p <= 60),
+                            "sh_mid": (lat_p >= -60) & (lat_p < -30)
+                        }
 
-                    bins = np.linspace(-15, 15, 61)
+                        bins = np.linspace(-15, 15, 61)
 
-                    for band_key, mask in regions.items():
-                        g_pred_vals = gamma_pred.where(mask, drop=True).values.ravel()
-                        g_ref_vals = gamma_ref.where(mask, drop=True).values.ravel()
-                        g_pred_vals = g_pred_vals[~np.isnan(g_pred_vals)]
-                        g_ref_vals = g_ref_vals[~np.isnan(g_ref_vals)]
+                        for band_key, mask in regions.items():
+                            g_pred_vals = gamma_pred.where(mask, drop=True).values.ravel()
+                            g_ref_vals = gamma_ref.where(mask, drop=True).values.ravel()
+                            g_pred_vals = g_pred_vals[~np.isnan(g_pred_vals)]
+                            g_ref_vals = g_ref_vals[~np.isnan(g_ref_vals)]
 
-                        if len(g_pred_vals) > 0 and len(g_ref_vals) > 0:
-                            hist_pred, _ = np.histogram(g_pred_vals, bins=bins, density=True)
-                            hist_ref, _ = np.histogram(g_ref_vals, bins=bins, density=True)
-                            
-                            for bi, b_val in enumerate(bins[:-1]):
-                                lr_dist_rows.append({
-                                    "date": date_str,
-                                    "lead_hours": lead_hours,
-                                    "region": band_key,
-                                    "bin_edge_lower": float(b_val),
-                                    "freq_pred": float(hist_pred[bi]),
-                                    "freq_ref": float(hist_ref[bi]),
-                                    "ensemble_member": m,
-                                })
-                        
+                            if len(g_pred_vals) > 0 and len(g_ref_vals) > 0:
+                                hist_pred, _ = np.histogram(g_pred_vals, bins=bins, density=True)
+                                hist_ref, _ = np.histogram(g_ref_vals, bins=bins, density=True)
+                                
+                                for bi, b_val in enumerate(bins[:-1]):
+                                    lr_dist_rows.append({
+                                        "date": date_str,
+                                        "lead_hours": lead_hours,
+                                        "region": band_key,
+                                        "bin_edge_lower": float(b_val),
+                                        "freq_pred": float(hist_pred[bi]),
+                                        "freq_ref": float(hist_ref[bi]),
+                                        "ensemble_member": m,
+                                    })
                 except (ValueError, KeyError, AttributeError) as exc:
-                    _log(f"    [{counter}] Lapse rate evaluation failed: {exc}")
+                    if "Distribution can't be empty" not in str(exc):
+                        _log(f"    [{counter}] Lapse rate evaluation failed for member {m}: {exc}")
+                    
+                    lr_results = {
+                        "lapse_rate_wasserstein_nh_mid": np.nan,
+                        "lapse_rate_wasserstein_sh_mid": np.nan,
+                        "lapse_rate_wasserstein_tropics": np.nan,
+                        "lapse_rate_wasserstein_global": np.nan,
+                    }
+                    for band_key, w1_val in lr_results.items():
+                        _append_summary(band_key, w1_val, None, ens_member=m)
 
                 # Configurable Target Spectra Evaluation
                 for s_idx, (var_type, lvl_val) in enumerate(spectra_list):
