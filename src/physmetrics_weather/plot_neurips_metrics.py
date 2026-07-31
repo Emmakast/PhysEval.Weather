@@ -444,7 +444,7 @@ class PhysicsPlotter:
                         df = self.summaries[m]
                         for lead in leads:
                             lead_col = next((c for c in ["lead_hours", "lead_time_hours", "lead_time", "forecast_hour"] if c in df.columns), None)
-                            df_lt = df[df[lead_col] == lead] if lead_col else df
+                            df_lt = df[(df[lead_col] >= lead - 6) & (df[lead_col] <= lead + 6)] if lead_col else df
                             if df_lt.empty and lead_col:
                                 avail = sorted(df[lead_col].dropna().unique())
                                 if avail: df_lt = df[df[lead_col] == min(avail, key=lambda x: abs(x - lead))]
@@ -466,7 +466,7 @@ class PhysicsPlotter:
 
             cell_texts = [["Metric", "Lead Time"] + model_labels]
             cell_colors = [[header_color] * len(cell_texts[0])]
-                
+
             for metric, m_label in metrics_list:
                 for l_idx, lead in enumerate(leads):
                     text_label = m_label if l_idx == len(leads)//2 else ""
@@ -480,7 +480,7 @@ class PhysicsPlotter:
                             df = self.summaries[m]
                             lead_col = next((c for c in ["lead_hours", "lead_time_hours", "lead_time", "forecast_hour"] if c in df.columns), None)
                             if lead_col:
-                                df_lt = df[df[lead_col] == lead]
+                                df_lt = df[(df[lead_col] >= lead - 6) & (df[lead_col] <= lead + 6)]
                                 val = np.nan
                                 if not df_lt.empty:
                                     if metric == "lapse_rate_wasserstein":
@@ -512,7 +512,8 @@ class PhysicsPlotter:
                                                 val = np.mean([v for v in vs if not np.isnan(v)]) if any(not np.isnan(v) for v in vs) else np.nan
                                             else:
                                                 val = get_value(df_lt, metric)
-                                            suffix = " *"
+                                            if nearest != lead:
+                                                suffix = " *"
                                     
                         if metric in ["hydrostatic_rmse", "geostrophic_rmse"] and not np.isnan(val):
                             ref_val = get_value(df_lt, metric, is_ref=True)
@@ -526,11 +527,12 @@ class PhysicsPlotter:
                             row_c.append(white)
                         else:
                             row_t.append(fmt(val, metric) + suffix)
-                            if metric == "effective_resolution_km" and m in ["hres", "neuralgcm"]:
-                                row_c.append(white)
+                            if metric == "effective_resolution_km":
+                                diff = max(val - 111.5, 0)
+                                intensity = min(diff / fixed_scales.get(metric, 500.0), 1.0) * 0.8
                             else:
-                                intensity = min(abs(val) / max_abs[metric], 1.0) * 0.8
-                                row_c.append(white * (1 - intensity) + red * intensity)
+                                intensity = min(abs(val) / fixed_scales.get(metric, max_abs.get(metric, 1.0)), 1.0) * 0.8
+                            row_c.append(white * (1 - intensity) + red * intensity)
                         
                     cell_texts.append(row_t)
                     cell_colors.append(row_c)
