@@ -72,7 +72,7 @@ Example Outputs
    :width: 100%
    :align: center
 
-.. image:: plots/spectra_ke_120h.png
+.. image:: plots/spectra_ke_240h.png
    :alt: Kinetic Energy Spectrum 120h
    :width: 80%
    :align: center
