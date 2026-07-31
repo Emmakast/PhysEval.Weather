@@ -8,8 +8,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
 project = "PhysMetrics.Weather"
-copyright = "2026, Emma Kasteleyn and Timo Maier"
-author = "Emma Kasteleyn and Timo Maier"
+copyright = "2026, Anonymous authors"
+author = "Anonymous authors"
 release = "0.1.0"
 
 extensions = [
