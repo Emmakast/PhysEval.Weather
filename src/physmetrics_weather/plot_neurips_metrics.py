@@ -234,7 +234,7 @@ def get_or_compute_hardcoded_rmse(results_dir: Path, summaries: dict[str, pd.Dat
         vals = _read_hardcoded_rmse(f)
         if "hydrostatic_rmse" in vals and "geostrophic_rmse" in vals:
             return vals
-    source = summaries.get("era5") or summaries.get("hres") or summaries.get("ifs_ens") or summaries.get("pangu")
+    source = next((summaries[k] for k in ["era5", "hres", "ifs_ens", "pangu"] if k in summaries), None)
     if source is None: return {}
     out = {
         "hydrostatic_rmse": _metric_mean(source, "hydrostatic_rmse", prefer_ref=True),
@@ -324,14 +324,13 @@ class PhysicsPlotter:
             color = self._get_color(model_name, idx)
             
             if is_conservation:
-                rel_df = df_m[["date", "forecast_hour", metric_col]].copy()
-                if "ensemble_member" in df_m.columns:
-                    rel_df["ensemble_member"] = df_m["ensemble_member"]
+                rel_df = df_m.copy()
+                if "ensemble_member" in rel_df.columns:
                     group_cols = ["date", "ensemble_member"]
                 else:
                     group_cols = ["date"]
                     
-                rel_df = rel_df.dropna()
+                rel_df = rel_df.dropna(subset=["date", "forecast_hour", metric_col])
                 if rel_df.empty: continue
                 
                 base = (
@@ -344,8 +343,9 @@ class PhysicsPlotter:
                 rel_df = rel_df[rel_df["base_val"].abs() > 0]
                 if rel_df.empty: continue
                 
-                df_m["plot_val"] = (rel_df[metric_col] - rel_df["base_val"]) / rel_df["base_val"] * 100.0
+                rel_df["plot_val"] = (rel_df[metric_col] - rel_df["base_val"]) / rel_df["base_val"] * 100.0
                 plot_col = "plot_val"
+                df_m = rel_df
             else:
                 if "rmse" in metric_col:
                     base_val = bases.get(model_name, bases.get("hres", bases.get("era5", 0.0)))
@@ -774,7 +774,13 @@ class PhysicsPlotter:
 
         ts_files = [f for f in csv_files if "time_series" in Path(f).name]
         if ts_files:
-            df_ts_list = [pd.read_csv(f) for f in ts_files]
+            df_ts_list = []
+            for f in ts_files:
+                df = pd.read_csv(f)
+                model_name = Path(f).stem.replace("time_series_", "").split("_")[0]
+                if "ifs_ens" in Path(f).name: model_name = "ifs_ens"
+                df["model"] = model_name
+                df_ts_list.append(df)
             df_ts = pd.concat(df_ts_list, ignore_index=True)
 
             if "dry_mass_Eg" in df_ts.columns:
