@@ -4,6 +4,8 @@ An open-source, unified framework for evaluating the **physical consistency**, *
 
 It computes diagnostic physical metrics against ERA5 or IFS HRES reference datasets from [WeatherBench 2](https://weatherbench2.readthedocs.io/), supporting both **deterministic** and **probabilistic / ensemble** weather models.
 
+> 📚 **[Read the Full Documentation Here](https://inquisitive-liger-31c464.netlify.app/)**  
+> *(Note for reviewers: The full HTML documentation is hosted on a neutral Netlify deployment to preserve double-blind anonymity.)*
 ---
 
 ## Authors
