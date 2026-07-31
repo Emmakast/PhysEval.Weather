@@ -16,6 +16,7 @@ It computes diagnostic physical metrics against ERA5 or IFS HRES reference datas
 ---
 
 ## Key Metrics Evaluated
+![Overview of Physical Metrics evaluated by PhysMetrics.Weather](metrics-overview.png)
 | Metric Category | Metric | What it measures |
 |---|---|---|
 | **Conservation & Stability** | **Dry Air Mass drift** | Is global dry-air mass conserved over time? (Exagrams, %/day) |
