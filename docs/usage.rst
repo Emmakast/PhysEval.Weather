@@ -52,6 +52,31 @@ The ``physmetrics-plot`` command reads long-format CSV files and renders publica
 
    physmetrics-plot --results-dir ./results --outdir ./plots
 
+This generates a set of diagnostic plots in the output directory, including:
+
+* **Time Series Diagnostics**: Global drift of mass and energy (e.g., ``ts_dry_mass_Eg.png``) and balance errors (e.g., ``ts_geostrophic_rmse.png``).
+* **Summary Tables**: Tables summarizing conservation, balance, and spectral metrics across lead times (e.g., ``neurips_table_balance.png``).
+* **Kinetic Energy Spectra**: KE spectra at target lead times (e.g., ``spectra_ke_120h.png``).
+* **Lapse Rate Distributions**: Regional lapse rate histograms (e.g., ``lapse_rate_tropics.png``).
+
+Example Outputs
+~~~~~~~~~~~~~~~
+
+.. image:: plots/ts_dry_mass_Eg.png
+   :alt: Global Dry Air Mass Drift
+   :width: 80%
+   :align: center
+
+.. image:: plots/neurips_table_conservation_variability.png
+   :alt: Conservation and Variability Summary
+   :width: 100%
+   :align: center
+
+.. image:: plots/spectra_ke_120h.png
+   :alt: Kinetic Energy Spectrum 120h
+   :width: 80%
+   :align: center
+
 2. Python API Usage
 -------------------
 
