@@ -1,5 +1,7 @@
 # PhysMetrics.Weather (physmetrics-weather)
 
+[![Documentation Status](https://readthedocs.org/projects/physmetricsweather/badge/?version=latest)](https://physmetricsweather.readthedocs.io/en/latest/?badge=latest)
+
 An open-source, unified framework for evaluating the **physical consistency**, **spectral resolution**, and **atmospheric balance** of Machine Learning Weather Prediction (MLWP) models.
 
 It computes diagnostic physical metrics against ERA5 or IFS HRES reference datasets from [WeatherBench 2](https://weatherbench2.readthedocs.io/), supporting both **deterministic** and **probabilistic / ensemble** weather models.
